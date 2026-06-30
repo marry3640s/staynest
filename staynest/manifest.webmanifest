@@ -1,0 +1,17 @@
+{
+  "name": "StayNest",
+  "short_name": "StayNest",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#fffaf4",
+  "theme_color": "#fffaf4",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

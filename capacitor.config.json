@@ -1,0 +1,8 @@
+{
+  "appId": "com.staynest.app",
+  "appName": "StayNest",
+  "webDir": "staynest",
+  "server": {
+    "cleartext": true
+  }
+}

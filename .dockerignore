@@ -1,0 +1,8 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+cpp/build
+clientportal.gw/build
+clientportal.gw/dist

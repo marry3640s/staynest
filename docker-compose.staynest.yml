@@ -1,0 +1,15 @@
+services:
+  staynest:
+    build:
+      context: .
+      dockerfile: Dockerfile.staynest
+    container_name: staynest
+    restart: unless-stopped
+    ports:
+      - "4174:4174"
+    environment:
+      STAYNEST_DEV_SMS: "1"
+      STAYNEST_USERS_PATH: "/app/data/users.json"
+      STAYNEST_GUIDE_APPLICATIONS_PATH: "/app/data/guide_applications.json"
+    volumes:
+      - ./staynest_data:/app/data

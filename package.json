@@ -1,0 +1,29 @@
+{
+  "name": "new-project",
+  "version": "1.0.0",
+  "description": "读取目录内的 SEC `10-K / 10-Q / 6-K / 20-F` 文件，提取常见财务指标和股本（shares outstanding）。",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marry3640s/us_stock_sec_analy_opencodex.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/marry3640s/us_stock_sec_analy_opencodex/issues"
+  },
+  "homepage": "https://github.com/marry3640s/us_stock_sec_analy_opencodex#readme",
+  "dependencies": {
+    "@capacitor-community/apple-sign-in": "^7.1.0",
+    "@capacitor/core": "^8.4.1",
+    "@capacitor/ios": "^8.4.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.4.1"
+  }
+}

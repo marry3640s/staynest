@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#fffaf4" />
+    <title>StayNest 平台管理</title>
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css?v=63" />
+  </head>
+  <body class="admin-body">
+    <div class="admin-shell">
+      <aside class="admin-sidebar">
+        <a class="admin-brand" href="./index.html" aria-label="返回 StayNest">
+          <span class="brand-mark">S</span>
+          <strong>StayNest</strong>
+        </a>
+        <nav class="admin-nav" aria-label="平台管理导航">
+          <button class="active" type="button" data-admin-module="guides">
+            <i data-lucide="badge-check"></i>
+            <span>审核导游</span>
+          </button>
+          <button type="button" data-admin-module="products">
+            <i data-lucide="map"></i>
+            <span>旅游产品</span>
+          </button>
+          <button type="button" data-admin-module="orders">
+            <i data-lucide="clipboard-list"></i>
+            <span>订单管理</span>
+          </button>
+          <button type="button" data-admin-module="users">
+            <i data-lucide="users"></i>
+            <span>用户管理</span>
+          </button>
+        </nav>
+      </aside>
+
+      <main class="admin-main">
+        <header class="admin-header">
+          <div>
+            <p class="eyebrow">平台管理</p>
+            <h1 id="adminPageTitle">审核导游</h1>
+          </div>
+          <div class="admin-header-actions">
+            <button class="admin-link-button danger" id="clearAllDataButton" type="button">清空所有数据</button>
+            <a class="admin-link-button" href="./index.html">打开用户端</a>
+          </div>
+        </header>
+
+        <section class="admin-view" id="guideAdminView">
+          <section class="review-metrics" aria-label="审核概览">
+            <div>
+              <span>待审核</span>
+              <strong id="pendingCount">0</strong>
+            </div>
+            <div>
+              <span>已通过</span>
+              <strong id="approvedCount">0</strong>
+            </div>
+            <div>
+              <span>已驳回</span>
+              <strong id="rejectedCount">0</strong>
+            </div>
+          </section>
+
+          <section class="review-layout">
+            <div class="review-list-panel">
+              <div class="review-toolbar">
+                <strong>申请列表</strong>
+                <select id="reviewFilter" aria-label="筛选申请状态">
+                  <option value="待审核">待审核</option>
+                  <option value="全部">全部</option>
+                  <option value="已通过">已通过</option>
+                  <option value="已驳回">已驳回</option>
+                </select>
+              </div>
+              <div class="review-list" id="reviewList"></div>
+            </div>
+
+            <article class="review-detail" id="reviewDetail" aria-live="polite"></article>
+          </section>
+        </section>
+
+        <section class="admin-view hidden" id="productAdminView">
+          <section class="review-metrics" aria-label="产品概览">
+            <div>
+              <span>全部产品</span>
+              <strong id="productTotalCount">0</strong>
+            </div>
+            <div>
+              <span>已发布</span>
+              <strong id="productPublishedCount">0</strong>
+            </div>
+            <div>
+              <span>草稿</span>
+              <strong id="productDraftCount">0</strong>
+            </div>
+          </section>
+
+          <section class="review-layout product-layout">
+            <div class="review-list-panel">
+              <div class="review-toolbar">
+                <strong>产品列表</strong>
+                <button class="admin-link-button" id="newProductButton" type="button">新增产品</button>
+              </div>
+              <div class="review-list" id="productList"></div>
+            </div>
+
+            <article class="review-detail product-editor" id="productEditor" aria-live="polite"></article>
+          </section>
+        </section>
+
+        <section class="admin-view hidden" id="orderAdminView">
+          <section class="review-metrics" aria-label="订单概览">
+            <div>
+              <span>待确认</span>
+              <strong id="orderPendingCount">0</strong>
+            </div>
+            <div>
+              <span>进行中</span>
+              <strong id="orderActiveCount">0</strong>
+            </div>
+            <div>
+              <span>已完成</span>
+              <strong id="orderDoneCount">0</strong>
+            </div>
+          </section>
+
+          <section class="admin-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">订单管理</p>
+                <h2>旅游产品订单</h2>
+              </div>
+              <div class="panel-actions">
+                <span id="orderTotalCount">0 条订单</span>
+                <button class="ghost-button" id="refreshOrdersButton" type="button">刷新订单</button>
+              </div>
+            </div>
+            <div class="admin-order-list" id="orderList"></div>
+          </section>
+        </section>
+
+        <section class="admin-view hidden" id="userAdminView">
+          <section class="review-metrics" aria-label="用户概览">
+            <div>
+              <span>游客用户</span>
+              <strong id="visitorUserCount">0</strong>
+            </div>
+            <div>
+              <span>导游用户</span>
+              <strong id="guideUserCount">0</strong>
+            </div>
+            <div>
+              <span>Apple 登录</span>
+              <strong id="appleUserCount">0</strong>
+            </div>
+          </section>
+
+          <section class="admin-panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">用户管理</p>
+                <h2>已注册用户</h2>
+              </div>
+              <div class="panel-actions">
+                <span id="userTotalCount">0 位用户</span>
+                <button class="ghost-button" id="refreshUsersButton" type="button">刷新用户</button>
+              </div>
+            </div>
+            <div class="admin-user-layout">
+              <div class="admin-user-list" id="userList"></div>
+              <article class="review-detail user-detail" id="userDetail" aria-live="polite"></article>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="danger-dialog" id="clearAllDialog">
+      <div class="danger-dialog-body">
+        <span class="danger-icon"><i data-lucide="triangle-alert"></i></span>
+        <div>
+          <p class="eyebrow">危险操作</p>
+          <h2>确定清空所有数据？</h2>
+          <p>这会删除当前原型里的导游审核、旅游产品、订单、用户端导游状态、登录缓存和收藏数据。此操作不能撤销。</p>
+        </div>
+      </div>
+      <div class="danger-dialog-actions">
+        <button class="ghost-button" id="cancelClearAllButton" type="button">取消</button>
+        <button class="primary-button danger-action" id="confirmClearAllButton" type="button">确认清空</button>
+      </div>
+    </dialog>
+
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <script src="./config.js?v=63"></script>
+    <script src="./admin.js?v=63"></script>
+  </body>
+</html>

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#fffaf4" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="StayNest" />
+    <title>StayNest</title>
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="preconnect" href="https://images.unsplash.com" />
+    <link rel="stylesheet" href="./styles.css?v=63" />
+  </head>
+  <body>
+    <div class="phone-shell" id="app">
+      <section class="auth-screen" id="authScreen" aria-label="登录">
+        <div class="auth-media">
+          <img
+            src="https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1000&q=80"
+            alt="湖边度假屋露台"
+          />
+          <div class="brand-lockup">
+            <span class="brand-mark">S</span>
+            <strong>StayNest</strong>
+          </div>
+        </div>
+
+        <div class="auth-panel">
+          <p class="eyebrow">短住与行程管家</p>
+          <h1>登录后继续你的下一段旅程</h1>
+
+          <form class="phone-login" id="phoneLoginForm" novalidate>
+            <label class="phone-field">
+              <span>手机号</span>
+              <span class="phone-input-row">
+                <select id="countryCodeInput" aria-label="国家或地区代码">
+                  <option value="+86">+86</option>
+                  <option value="+1">+1</option>
+                  <option value="+852">+852</option>
+                  <option value="+81">+81</option>
+                  <option value="+65">+65</option>
+                </select>
+                <input id="phoneInput" type="tel" inputmode="tel" autocomplete="tel" placeholder="138 0000 0000" />
+              </span>
+            </label>
+
+            <label class="code-field">
+              <span>验证码</span>
+              <span class="code-input-row">
+                <input id="codeInput" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位验证码" />
+                <button class="ghost-button" id="sendCodeButton" type="button">发送验证码</button>
+              </span>
+            </label>
+
+            <label class="agree-row">
+              <input id="termsInput" type="checkbox" />
+              <span>我已阅读并同意《服务条款》和《隐私政策》</span>
+            </label>
+
+            <p class="auth-message" id="authMessage" role="status" aria-live="polite"></p>
+            <button class="primary-button" id="phoneLoginButton" type="submit">手机号登录</button>
+          </form>
+
+          <div class="login-divider">
+            <span></span>
+            <strong>其他登录方式</strong>
+            <span></span>
+          </div>
+
+          <div class="auth-actions">
+            <button class="auth-button" type="button" data-provider="apple">
+              <i data-lucide="apple"></i>
+              <span>使用 Apple ID 登录</span>
+            </button>
+            <button class="auth-button" type="button" data-provider="google">
+              <i data-lucide="chrome"></i>
+              <span>使用 Google 账号登录</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section class="registration-screen hidden" id="registrationScreen" aria-label="完善资料">
+        <div class="registration-panel">
+          <button class="back-button" id="registrationBackButton" type="button">
+            <i data-lucide="chevron-left"></i>
+            返回登录
+          </button>
+
+          <div class="registration-head">
+            <p class="eyebrow">首次登录</p>
+            <h1>完善你的资料</h1>
+            <p id="registrationPhoneText">手机号已验证</p>
+          </div>
+
+          <form class="registration-form" id="registrationForm" novalidate>
+            <label>
+              <span>姓名</span>
+              <input id="nameInput" type="text" maxlength="24" autocomplete="name" placeholder="例如：王小野" />
+            </label>
+
+            <label>
+              <span>性别</span>
+              <select id="genderInput">
+                <option value="">请选择</option>
+                <option value="女">女</option>
+                <option value="男">男</option>
+                <option value="其他">其他</option>
+                <option value="不便透露">不便透露</option>
+              </select>
+            </label>
+
+            <label>
+              <span>个人信息介绍</span>
+              <textarea id="bioInput" maxlength="160" rows="4" placeholder="简单介绍你的旅行偏好、常住城市或希望被如何称呼"></textarea>
+            </label>
+
+            <p class="auth-message" id="registrationMessage" role="status" aria-live="polite"></p>
+            <button class="primary-button" id="registrationSubmitButton" type="submit">完成注册</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="mobile-app hidden" id="mobileApp" aria-label="StayNest App">
+        <header class="app-header">
+          <div>
+            <span class="overline" id="headerOverline">欢迎回来</span>
+            <h2 id="headerTitle">探索</h2>
+          </div>
+          <button class="avatar-button" type="button" id="quickProfile" aria-label="打开我的资料">
+            <span id="avatarInitial">Y</span>
+          </button>
+        </header>
+
+        <main class="app-content" id="appContent"></main>
+
+        <nav class="bottom-nav" aria-label="底部导航">
+          <button class="tab-button active" type="button" data-tab="search" aria-label="探索">
+            <i data-lucide="search"></i>
+            <span>探索</span>
+          </button>
+          <button class="tab-button" type="button" data-tab="trips" aria-label="行程">
+            <i data-lucide="calendar-days"></i>
+            <span>行程</span>
+          </button>
+          <button class="tab-button" type="button" data-tab="messages" aria-label="消息">
+            <i data-lucide="message-circle"></i>
+            <span>消息</span>
+          </button>
+          <button class="tab-button" type="button" data-tab="profile" aria-label="我的资料">
+            <i data-lucide="user-round"></i>
+            <span>我的资料</span>
+          </button>
+        </nav>
+      </section>
+    </div>
+
+    <dialog class="listing-dialog" id="listingDialog">
+      <button class="dialog-close icon-button" id="dialogClose" type="button" aria-label="关闭">
+        <i data-lucide="x"></i>
+      </button>
+      <div class="dialog-body" id="dialogBody"></div>
+    </dialog>
+
+    <script src="https://appleid.cdn-apple.com/appleauth/static/jsapi/appleid/1/en_US/appleid.auth.js"></script>
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <script src="./config.js?v=63"></script>
+    <script src="./app.js?v=63"></script>
+  </body>
+</html>
