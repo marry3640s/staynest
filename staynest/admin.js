@@ -712,14 +712,32 @@ function renderAttachment(attachment, fallbackLabel) {
   }
   const label = attachment.label || fallbackLabel;
   const name = attachment.name || label;
+  const size = getAttachmentSize(attachment);
+  const originalSize = Number(attachment.originalSize || 0);
   const isImage = String(attachment.type || "").startsWith("image/") || attachment.dataUrl.startsWith("data:image/");
   return `
     <a class="attachment-card" href="${escapeHtml(attachment.dataUrl)}" target="_blank" rel="noreferrer">
       ${isImage ? `<img src="${escapeHtml(attachment.dataUrl)}" alt="${escapeHtml(label)}" />` : `<span><i data-lucide="file-text"></i></span>`}
       <strong>${escapeHtml(label)}</strong>
       <small>${escapeHtml(name)}</small>
+      <small class="attachment-size">大小：${escapeHtml(formatBytes(size))}${originalSize ? ` · 原图：${escapeHtml(formatBytes(originalSize))}` : ""}</small>
     </a>
   `;
+}
+
+function getAttachmentSize(attachment) {
+  const storedSize = Number(attachment?.size || 0);
+  if (storedSize > 0) return storedSize;
+  return estimateDataUrlBytes(attachment?.dataUrl || "");
+}
+
+function estimateDataUrlBytes(dataUrl) {
+  const value = String(dataUrl || "");
+  const commaIndex = value.indexOf(",");
+  if (commaIndex < 0) return 0;
+  const base64 = value.slice(commaIndex + 1).replace(/\s/g, "");
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
 }
 
 async function updateApplication(id, reviewStatus, rejectReason = "") {

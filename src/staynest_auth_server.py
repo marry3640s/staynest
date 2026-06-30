@@ -829,6 +829,8 @@ def _public_guide_application(application: dict[str, Any]) -> dict[str, Any]:
         "realName": str(application.get("realName") or application.get("applicantName") or "StayNest 用户"),
         "gender": str(application.get("gender") or ""),
         "phone": str(application.get("phone") or ""),
+        "appleSub": str(application.get("appleSub") or ""),
+        "email": str(application.get("email") or ""),
         "avatar": str(application.get("avatar") or "teal"),
         "city": str(application.get("city") or "未填写"),
         "specialty": str(application.get("specialty") or "未填写"),
@@ -847,6 +849,37 @@ def _public_guide_application(application: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _find_existing_guide_application_index(user: dict[str, Any], real_name: str) -> int:
+    phone = "".join(ch for ch in str(user.get("phone") or "") if ch.isdigit())
+    apple_sub = str(user.get("appleSub") or "").strip()
+    email = str(user.get("email") or "").strip().lower()
+    names = {
+        str(real_name or "").strip(),
+        str(user.get("name") or "").strip(),
+        str(user.get("nickname") or "").strip(),
+    }
+    names.discard("")
+
+    for index, item in enumerate(guide_applications):
+        item_phone = "".join(ch for ch in str(item.get("phone") or "") if ch.isdigit())
+        item_apple_sub = str(item.get("appleSub") or "").strip()
+        item_email = str(item.get("email") or "").strip().lower()
+        item_names = {
+            str(item.get("realName") or "").strip(),
+            str(item.get("applicantName") or "").strip(),
+        }
+        item_names.discard("")
+        if phone and item_phone and item_phone == phone:
+            return index
+        if apple_sub and item_apple_sub and item_apple_sub == apple_sub:
+            return index
+        if email and item_email and item_email == email:
+            return index
+        if names and item_names and names.intersection(item_names):
+            return index
+    return -1
+
+
 def _public_attachment(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -859,6 +892,7 @@ def _public_attachment(value: Any) -> dict[str, Any] | None:
         "name": name,
         "type": str(value.get("type") or "").strip(),
         "size": int(value.get("size") or 0),
+        "originalSize": int(value.get("originalSize") or 0),
         "dataUrl": data_url,
     }
 
@@ -1543,13 +1577,17 @@ def _handle_create_guide_application(environ, start_response):
         return _error(start_response, "400 Bad Request", "请上传身份证正反面和形象照片。")
 
     phone = str(user.get("phone") or "")
-    existing_index = next((index for index, item in enumerate(guide_applications) if item.get("phone") == phone and phone), -1)
+    apple_sub = str(user.get("appleSub") or "")
+    email = str(user.get("email") or "")
+    existing_index = _find_existing_guide_application_index(user, real_name)
     application = {
         "id": str(guide_applications[existing_index].get("id") if existing_index >= 0 else f"guide-{int(time.time() * 1000)}"),
         "applicantName": real_name,
         "realName": real_name,
         "gender": gender,
         "phone": phone,
+        "appleSub": apple_sub,
+        "email": email,
         "avatar": str(user.get("avatar") or "teal"),
         "city": city,
         "specialty": specialty,

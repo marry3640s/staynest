@@ -1,4 +1,4 @@
-const CACHE_NAME = "staynest-v63";
+const CACHE_NAME = "staynest-v65";
 const ASSETS = [
   "./",
   "./index.html",

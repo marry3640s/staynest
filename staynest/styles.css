@@ -2344,6 +2344,11 @@ h1 {
   text-overflow: ellipsis;
 }
 
+.attachment-size {
+  color: var(--teal) !important;
+  font-weight: 900;
+}
+
 .reject-note {
   padding: 12px;
   background: rgba(225, 77, 69, 0.08);

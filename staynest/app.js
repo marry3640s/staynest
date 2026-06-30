@@ -166,6 +166,7 @@ const state = {
   guideFormOpen: false,
   guideSyncing: false,
   guideStatusSyncing: false,
+  guideSubmitting: false,
 };
 
 state.guideApplication = loadGuideApplicationForUser(state.user);
@@ -1943,6 +1944,7 @@ function renderProfile() {
   if (guideForm) {
     guideForm.addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (state.guideSubmitting) return;
       const realName = document.querySelector("#guideNameInput").value.trim();
       const gender = document.querySelector("#guideGenderInput").value;
       const city = document.querySelector("#guideCityInput").value.trim();
@@ -1969,6 +1971,7 @@ function renderProfile() {
         return;
       }
 
+      state.guideSubmitting = true;
       submitButton.disabled = true;
       submitButton.textContent = "正在提交...";
       message.textContent = "正在压缩图片并提交导游申请...";
@@ -2015,6 +2018,7 @@ function renderProfile() {
         message.classList.add("error");
         message.classList.remove("success");
       } finally {
+        state.guideSubmitting = false;
         submitButton.disabled = false;
         submitButton.textContent = "提交导游申请";
       }
@@ -2236,7 +2240,7 @@ function removeLocalGuideApplication(application, phone = "") {
 
 async function syncGuideApplicationToServer() {
   const application = state.guideApplication;
-  if (!application || application.serverSynced || state.guideSyncing) return;
+  if (!application || application.serverSynced || state.guideSyncing || state.guideSubmitting) return;
   const reviewStatus = application.reviewStatus || application.status;
   if (reviewStatus !== "待审核" && reviewStatus !== "审核中") return;
   const token = localStorage.getItem("staynestToken") || "";
