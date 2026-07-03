@@ -14,6 +14,8 @@ const productState = {
   isCreating: false,
 };
 
+let productBodyEditorRange = null;
+
 const orderState = {
   orders: [],
 };
@@ -174,6 +176,8 @@ function normalizeApplication(application) {
     realName: application.realName || application.applicantName || "StayNest 用户",
     gender: application.gender || "",
     phone: application.phone || "",
+    appleSub: application.appleSub || "",
+    email: application.email || "",
     avatar: application.avatar || "teal",
     city: application.city || "未填写",
     specialty: application.specialty || "未填写",
@@ -205,6 +209,8 @@ function normalizeUser(user) {
     appleSub: user.appleSub || "",
     role: user.role || "游客",
     guideStatus: user.guideStatus || "未申请",
+    guideLevel: user.guideLevel || "",
+    guideCompletedOrders: Number(user.guideCompletedOrders) || 0,
     createdAt: user.created_at || user.createdAt || "",
   };
 }
@@ -242,9 +248,17 @@ function normalizeOrder(order = {}) {
     preference: order.preference || "",
     duration: order.duration || "",
     travelDate: order.travelDate || "",
+    lodgingAddress: order.lodgingAddress || "",
     price: Number(order.price) || 0,
     travelerName: order.travelerName || "游客",
+    travelerIdInfo: order.travelerIdInfo || "",
     travelerPhone: order.travelerPhone || "",
+    companions: Array.isArray(order.companions) ? order.companions : [],
+    companionInfo: order.companionInfo || "",
+    dietaryNotes: order.dietaryNotes || "",
+    orderRemark: order.orderRemark || "",
+    paymentMethod: order.paymentMethod || "",
+    paymentStatus: order.paymentStatus || "",
     status: order.status || "待确认",
     createdAt: order.createdAt || "",
     updatedAt: order.updatedAt || "",
@@ -391,8 +405,12 @@ function renderOrderAdmin() {
             <div class="admin-order-meta">
               <span><i data-lucide="calendar-days"></i>${escapeHtml(order.travelDate || "未选日期")}</span>
               <span><i data-lucide="user-round"></i>${escapeHtml(order.travelerName)}</span>
+              ${order.travelerIdInfo ? `<span><i data-lucide="id-card"></i>${escapeHtml(order.travelerIdInfo)}</span>` : ""}
               ${order.travelerPhone ? `<span><i data-lucide="phone"></i>${escapeHtml(order.travelerPhone)}</span>` : ""}
+              ${order.paymentStatus ? `<span><i data-lucide="badge-check"></i>${escapeHtml(order.paymentStatus)}${order.paymentMethod ? ` · ${escapeHtml(order.paymentMethod)}` : ""}</span>` : ""}
+              ${order.lodgingAddress ? `<span><i data-lucide="map-pin"></i>${escapeHtml(order.lodgingAddress)}</span>` : ""}
             </div>
+            <p>${order.companionInfo ? `同行人：${escapeHtml(order.companionInfo)} · ` : ""}${order.dietaryNotes ? `饮食及过敏源：${escapeHtml(order.dietaryNotes)} · ` : ""}${order.orderRemark ? `备注：${escapeHtml(order.orderRemark)}` : ""}</p>
           </div>
           <strong class="admin-order-price">¥${formatMoney(order.price)}</strong>
         </article>
@@ -406,7 +424,7 @@ function renderUserAdmin() {
   if (!users.some((user) => user.id === userState.selectedId)) {
     userState.selectedId = users[0]?.id || "";
   }
-  const guideUsers = users.filter((user) => user.role === "导游").length;
+  const guideUsers = users.filter((user) => user.guideStatus === "已通过").length;
   const appleUsers = users.filter((user) => user.method === "Apple ID").length;
   const visitorUsers = users.length - guideUsers;
   document.querySelector("#visitorUserCount").textContent = visitorUsers;
@@ -435,7 +453,7 @@ function renderUserAdmin() {
           <div class="admin-user-main">
             <div class="admin-order-head">
               <strong>${escapeHtml(user.name)}</strong>
-              <span class="review-status ${user.role === "导游" ? "approved" : "pending"}">${escapeHtml(user.role)}</span>
+              <span class="review-status ${user.guideStatus === "已通过" ? "approved" : "pending"}">${escapeHtml(user.guideLevel || user.role)}</span>
             </div>
             <p>${escapeHtml(user.bio || "暂无个人介绍")}</p>
             <div class="admin-order-meta">
@@ -482,6 +500,8 @@ function renderUserDetail() {
 
   const matchedOrders = getOrdersForUser(selected);
   const guideApplication = getGuideApplicationForUser(selected);
+  const displayPhone = selected.phone || guideApplication?.phone || "";
+  const displayEmail = selected.email || guideApplication?.email || "";
   const activeOrders = matchedOrders.filter((order) => order.status === "进行中").length;
   const finishedOrders = matchedOrders.filter((order) => order.status === "已完成").length;
 
@@ -491,21 +511,22 @@ function renderUserDetail() {
       <div>
         <p class="eyebrow">用户详情</p>
         <h2>${escapeHtml(selected.name)}</h2>
-        <p>${escapeHtml(selected.phone || selected.email || "暂无联系方式")}</p>
+        <p>${escapeHtml(displayPhone || displayEmail || "暂无联系方式")}</p>
       </div>
-      <span class="review-status ${selected.role === "导游" ? "approved" : "pending"}">${escapeHtml(selected.role)}</span>
+      <span class="review-status ${selected.guideStatus === "已通过" ? "approved" : "pending"}">${escapeHtml(selected.guideLevel || selected.role)}</span>
     </div>
 
     <div class="detail-grid user-detail-grid">
       <div><span>登录方式</span><strong>${escapeHtml(selected.method)}</strong></div>
-      <div><span>手机号</span><strong>${escapeHtml(selected.phone || "未绑定")}</strong></div>
-      <div><span>邮箱</span><strong>${escapeHtml(selected.email || "未绑定")}</strong></div>
+      <div><span>手机号</span><strong>${escapeHtml(displayPhone || "未绑定")}</strong></div>
+      <div><span>邮箱</span><strong>${escapeHtml(displayEmail || "未绑定")}</strong></div>
       <div><span>性别</span><strong>${escapeHtml(selected.gender || "未填写")}</strong></div>
       <div><span>导游状态</span><strong>${escapeHtml(selected.guideStatus || "未申请")}</strong></div>
+      <div><span>导游等级</span><strong>${escapeHtml(selected.guideLevel || "暂无")}</strong></div>
       <div><span>注册时间</span><strong>${escapeHtml(formatDateTime(selected.createdAt) || "未记录")}</strong></div>
       <div><span>关联订单</span><strong>${matchedOrders.length} 单</strong></div>
       <div><span>进行中</span><strong>${activeOrders} 单</strong></div>
-      <div><span>已完成</span><strong>${finishedOrders} 单</strong></div>
+      <div><span>已完成</span><strong>${Math.max(finishedOrders, selected.guideCompletedOrders)} 单</strong></div>
     </div>
 
     <section class="detail-section">
@@ -566,7 +587,7 @@ function renderUserOrderSummary(orders) {
             <div class="user-order-mini">
               <div>
                 <strong>${escapeHtml(order.productTitle)}</strong>
-                <p>${escapeHtml(order.travelDate || "未选日期")} · ${escapeHtml(order.destination || "未填写目的地")}</p>
+                <p>${escapeHtml(order.travelDate || "未选日期")} · ${escapeHtml(order.destination || "未填写目的地")}${order.lodgingAddress ? ` · ${escapeHtml(order.lodgingAddress)}` : ""}</p>
               </div>
               <span class="review-status ${order.status === "已完成" ? "approved" : "pending"}">${escapeHtml(order.status)}</span>
               <b>¥${formatMoney(order.price)}</b>
@@ -579,13 +600,22 @@ function renderUserOrderSummary(orders) {
 }
 
 function getOrdersForUser(user) {
-  const phone = normalizeDigits(user.phone);
+  const guideApplication = getGuideApplicationForUser(user);
+  const phone = normalizeDigits(user.phone || guideApplication?.phone);
   const name = normalizeText(user.name);
   const nickname = normalizeText(user.nickname);
+  const guideName = normalizeText(guideApplication?.realName || guideApplication?.applicantName);
   return orderState.orders.filter((order) => {
     const travelerPhone = normalizeDigits(order.travelerPhone);
     const travelerName = normalizeText(order.travelerName);
-    return (phone && travelerPhone === phone) || (name && travelerName === name) || (nickname && travelerName === nickname);
+    const orderGuidePhone = normalizeDigits(order.guidePhone);
+    const orderGuideName = normalizeText(order.guideName);
+    return (
+      (phone && (travelerPhone === phone || orderGuidePhone === phone)) ||
+      (name && (travelerName === name || orderGuideName === name)) ||
+      (nickname && (travelerName === nickname || orderGuideName === nickname)) ||
+      (guideName && orderGuideName === guideName)
+    );
   });
 }
 
@@ -593,10 +623,20 @@ function getGuideApplicationForUser(user) {
   const phone = normalizeDigits(user.phone);
   const name = normalizeText(user.name);
   const nickname = normalizeText(user.nickname);
+  const appleSub = normalizeText(user.appleSub);
+  const email = normalizeText(user.email);
   return reviewState.applications.find((application) => {
     const applicationPhone = normalizeDigits(application.phone);
+    const applicationAppleSub = normalizeText(application.appleSub);
+    const applicationEmail = normalizeText(application.email);
     const applicantName = normalizeText(application.realName || application.applicantName);
-    return (phone && applicationPhone === phone) || (name && applicantName === name) || (nickname && applicantName === nickname);
+    return (
+      (phone && applicationPhone === phone) ||
+      (appleSub && applicationAppleSub && applicationAppleSub === appleSub) ||
+      (email && applicationEmail && applicationEmail === email) ||
+      (name && applicantName === name) ||
+      (nickname && applicantName === nickname)
+    );
   });
 }
 
@@ -856,10 +896,17 @@ function renderProductEditor() {
             <strong>正文介绍</strong>
             <span>直接写文字，也可以从本地插入图片</span>
           </div>
-          <label>
+          <div class="product-editor-field">
             <span>正文内容</span>
-            <textarea id="productBodyContentInput" rows="12" placeholder="上午先去熊猫基地，看熊猫进食和活动。&#10;&#10;图片：https://...｜熊猫基地上午游览场景&#10;&#10;下午转入文殊院和宽窄巷子，感受老成都街巷。">${escapeHtml(formatBodyBlocks(product))}</textarea>
-          </label>
+            <div
+              class="product-body-editor"
+              id="productBodyContentEditor"
+              contenteditable="true"
+              role="textbox"
+              aria-multiline="true"
+              data-placeholder="写正文介绍，点击“本地插入图片”后图片会直接出现在正文中。"
+            >${renderProductBodyEditorBlocks(getProductBodyBlocks(product))}</div>
+          </div>
           <div class="publisher-inline-actions">
             <input class="visually-hidden-file" id="productLocalBodyImageInput" type="file" accept="image/*" />
             <button class="ghost-button" id="insertBodyImageButton" type="button">插入图片地址</button>
@@ -927,8 +974,13 @@ function renderProductEditor() {
   form.addEventListener("submit", saveProduct);
   form.addEventListener("input", renderProductPreview);
   form.addEventListener("change", renderProductPreview);
+  const bodyEditor = document.querySelector("#productBodyContentEditor");
+  ["focus", "input", "keyup", "mouseup"].forEach((eventName) => {
+    bodyEditor.addEventListener(eventName, saveProductBodyEditorRange);
+  });
   document.querySelector("#insertBodyImageButton").addEventListener("click", insertBodyImageBlock);
   document.querySelector("#uploadBodyImageButton").addEventListener("click", () => {
+    saveProductBodyEditorRange();
     document.querySelector("#productLocalBodyImageInput").click();
   });
   document.querySelector("#productLocalBodyImageInput").addEventListener("change", insertLocalBodyImageBlock);
@@ -940,7 +992,10 @@ function renderProductEditor() {
 }
 
 function insertBodyImageBlock() {
-  insertBodyImageText("图片：https://example.com/image.jpg｜图片说明");
+  const src = window.prompt("请输入图片地址", "https://example.com/image.jpg");
+  if (!src) return;
+  const caption = window.prompt("请输入图片说明", "图片说明") || "";
+  insertBodyImageElement(src.trim(), caption.trim());
 }
 
 const PRODUCT_IMAGE_MAX_BYTES = 3 * 1024 * 1024;
@@ -960,7 +1015,7 @@ async function insertLocalBodyImageBlock(event) {
 
   try {
     const image = await productImageFileToDataUrl(file);
-    insertBodyImageText(`图片：${image.dataUrl}｜${image.caption}`);
+    insertBodyImageElement(image.dataUrl, image.caption);
     if (hint) {
       hint.textContent = image.compressed
         ? `已插入并压缩：${formatBytes(image.size)}`
@@ -1002,10 +1057,9 @@ async function productImageFileToDataUrl(file) {
   }
 
   const dataUrl = await blobToDataUrl(blob);
-  const caption = file.name.replace(/\.[^.]+$/, "") || "正文图片";
   return {
     dataUrl,
-    caption,
+    caption: "",
     size: blob.size,
     compressed: blob.size < file.size || scale < 1,
   };
@@ -1054,16 +1108,71 @@ function formatBytes(bytes) {
   return `${Math.max(1, Math.round(bytes / 1024))}KB`;
 }
 
-function insertBodyImageText(insertion) {
-  const input = document.querySelector("#productBodyContentInput");
-  const prefix = input.value && !input.value.endsWith("\n") ? "\n\n" : "";
-  const start = input.selectionStart ?? input.value.length;
-  const end = input.selectionEnd ?? input.value.length;
-  input.value = `${input.value.slice(0, start)}${prefix}${insertion}${input.value.slice(end)}`;
-  const cursor = start + prefix.length + insertion.length;
-  input.focus();
-  input.setSelectionRange(cursor, cursor);
+function insertBodyImageElement(src, caption = "") {
+  const editor = document.querySelector("#productBodyContentEditor");
+  if (!editor || !src) return;
+
+  editor.focus();
+  removeEmptyEditorPlaceholder(editor);
+  const figure = createProductBodyImageFigure(src, caption);
+  const after = document.createElement("p");
+  after.innerHTML = "<br>";
+
+  const selection = window.getSelection();
+  let range = null;
+  if (selection?.rangeCount && editor.contains(selection.anchorNode)) {
+    range = selection.getRangeAt(0);
+    range.deleteContents();
+  } else if (productBodyEditorRange && editor.contains(productBodyEditorRange.commonAncestorContainer)) {
+    range = productBodyEditorRange;
+    range.deleteContents();
+  } else {
+    range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+  }
+
+  range.insertNode(after);
+  range.insertNode(figure);
+  range.setStart(after, 0);
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  productBodyEditorRange = range.cloneRange();
   renderProductPreview();
+}
+
+function saveProductBodyEditorRange() {
+  const editor = document.querySelector("#productBodyContentEditor");
+  const selection = window.getSelection();
+  if (!editor || !selection?.rangeCount || !editor.contains(selection.anchorNode)) return;
+  productBodyEditorRange = selection.getRangeAt(0).cloneRange();
+}
+
+function removeEmptyEditorPlaceholder(editor) {
+  const text = editor.textContent.replace(/\u00a0/g, "").trim();
+  if (!text && !editor.querySelector("img")) {
+    editor.innerHTML = "";
+  }
+}
+
+function createProductBodyImageFigure(src, caption = "") {
+  const figure = document.createElement("figure");
+  figure.className = "product-body-image";
+  figure.dataset.bodyImage = "true";
+  figure.contentEditable = "false";
+
+  const image = document.createElement("img");
+  image.src = src;
+  image.alt = caption || "正文图片";
+  figure.appendChild(image);
+
+  if (caption) {
+    const figcaption = document.createElement("figcaption");
+    figcaption.textContent = caption;
+    figure.appendChild(figcaption);
+  }
+  return figure;
 }
 
 function renderProductPreview() {
@@ -1206,7 +1315,7 @@ function collectProductForm(status) {
     duration: document.querySelector("#productDurationInput").value.trim() || "一日游",
     price: Number(document.querySelector("#productPriceInput").value) || 0,
     highlights: parseLineList(document.querySelector("#productHighlightsInput").value),
-    bodyBlocks: parseBodyBlocks(document.querySelector("#productBodyContentInput").value),
+    bodyBlocks: collectProductBodyEditorBlocks(),
     status,
   };
   const firstText = payload.bodyBlocks.find((block) => block.type === "text")?.text || "";
@@ -1267,6 +1376,80 @@ function parseDelimitedRows(value, count) {
     .filter((items) => items.length === count && items.every(Boolean));
 }
 
+function getProductBodyBlocks(product) {
+  if (Array.isArray(product.bodyBlocks) && product.bodyBlocks.length) {
+    return product.bodyBlocks;
+  }
+  return [
+    ...(product.intro ? [{ type: "text", text: product.intro }] : []),
+    ...(Array.isArray(product.bodyImages) ? product.bodyImages.map(([src, caption]) => ({ type: "image", src, caption })) : []),
+  ];
+}
+
+function renderProductBodyEditorBlocks(blocks) {
+  if (!blocks.length) return "<p><br></p>";
+  return blocks
+    .map((block) => {
+      if (block.type === "image" && block.src) {
+        const caption = String(block.src || "").startsWith("data:image/") ? "" : block.caption || "";
+        return `
+          <figure class="product-body-image" data-body-image="true" contenteditable="false">
+            <img src="${escapeHtml(block.src)}" alt="${escapeHtml(caption || "正文图片")}" />
+            ${caption ? `<figcaption>${escapeHtml(caption)}</figcaption>` : ""}
+          </figure>
+        `;
+      }
+      return String(block.text || "")
+        .split("\n")
+        .map((line) => `<p>${line.trim() ? escapeHtml(line.trim()) : "<br>"}</p>`)
+        .join("");
+    })
+    .join("");
+}
+
+function collectProductBodyEditorBlocks() {
+  const editor = document.querySelector("#productBodyContentEditor");
+  if (!editor) return [];
+
+  const blocks = [];
+  const pushText = (text) => {
+    String(text || "")
+      .split("\n")
+      .map((line) => line.replace(/\u00a0/g, " ").trim())
+      .filter(Boolean)
+      .forEach((line) => blocks.push({ type: "text", text: line }));
+  };
+  const pushImage = (element) => {
+    const image = element.matches("img") ? element : element.querySelector("img");
+    if (!image?.src) return;
+    const caption = image.src.startsWith("data:image/") ? "" : element.querySelector?.("figcaption")?.textContent?.trim() || "";
+    blocks.push({ type: "image", src: image.src, caption });
+  };
+
+  Array.from(editor.childNodes).forEach((node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      pushText(node.textContent);
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+    if (node.matches("figure[data-body-image], figure.product-body-image")) {
+      pushImage(node);
+      return;
+    }
+
+    const directImage = node.matches("img") ? node : null;
+    if (directImage) {
+      pushImage(directImage);
+      return;
+    }
+
+    pushText(node.innerText || node.textContent);
+  });
+
+  return blocks;
+}
+
 function parseBodyBlocks(value) {
   return value
     .split("\n")
@@ -1296,13 +1479,7 @@ function formatBodyImages(rows) {
 }
 
 function formatBodyBlocks(product) {
-  const blocks = Array.isArray(product.bodyBlocks) && product.bodyBlocks.length
-    ? product.bodyBlocks
-    : [
-        ...(product.intro ? [{ type: "text", text: product.intro }] : []),
-        ...product.bodyImages.map(([src, caption]) => ({ type: "image", src, caption })),
-      ];
-  return blocks
+  return getProductBodyBlocks(product)
     .map((block) => {
       if (block.type === "image") return `图片：${block.src || ""}｜${block.caption || ""}`;
       return block.text || "";

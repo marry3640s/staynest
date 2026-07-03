@@ -1,6 +1,6 @@
 # StayNest
 
-StayNest is a travel service prototype with a mobile web app, platform admin console, SQLite-backed Python backend, and Capacitor iOS wrapper.
+StayNest is a mobile-first travel service app with a lightweight Python backend, SQLite storage, a web admin console, and a Capacitor iOS wrapper.
 
 ## Local Development
 
@@ -12,30 +12,43 @@ Open:
 
 ```text
 http://127.0.0.1:4174
+http://127.0.0.1:4174/admin.html
 ```
 
-Admin console:
+The development SMS code is currently fixed as:
 
 ```text
-http://127.0.0.1:4174/admin.html
+123456
 ```
 
 ## iOS
 
 ```bash
-npm install
 npx cap sync ios
-npx cap open ios
 ```
 
-## Data
+Then open the iOS project in Xcode:
 
-Runtime data is stored in SQLite at `staynest.sqlite3` by default. Override it with:
+```text
+ios/App/App.xcodeproj
+```
+
+## Deployment
+
+The backend serves both the API and static frontend files:
 
 ```bash
-export STAYNEST_DB_PATH="/opt/staynest/staynest.sqlite3"
+python3 -m src.staynest_auth_server --host 0.0.0.0 --port 4174
 ```
 
-## SMS
+Runtime data is stored in SQLite. Do not overwrite `staynest.sqlite3` when deploying code updates.
 
-Development mode uses fixed verification code `123456`. For production, configure Aliyun SMS environment variables in `src/staynest_auth_server.py`.
+## Main Features
+
+- Phone login and Apple ID login with phone binding
+- Fast app startup with local session, silent session refresh, and persisted server sessions
+- Traveler product browsing and order creation
+- Guide application and guide order grabbing
+- Trips, messages, unread badges, and chat translation to English
+- Profile editing with name, gender, nationality, bio, and avatar upload
+- Admin console for guide review, travel products, orders, and users

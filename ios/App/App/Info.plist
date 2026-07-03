@@ -19,6 +19,8 @@
 	<string>StayNest 需要访问照片图库以上传导游审核资料和证书附件。</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>StayNest 可能需要保存或更新你选择的审核资料图片。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>StayNest 需要使用当前位置，帮助填写游客下榻住所或接送地址。</string>
 	<key>CFBundleDisplayName</key>
 	<string>StayNest</string>
 	<key>CFBundleExecutable</key>

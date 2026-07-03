@@ -103,26 +103,15 @@ const listings = [
   },
 ];
 
-const trips = [
-  {
-    id: 101,
-    title: "三亚海岸线玻璃泳池别墅",
-    date: "7月21日 - 26日",
-    status: "已确认",
-    image: listings[2].image,
-    detail: "8 位房客 · 入住码 4829 · 房东 Annie",
-  },
-  {
-    id: 102,
-    title: "京都町屋庭院套房",
-    date: "10月8日 - 13日",
-    status: "待付款",
-    image: listings[4].image,
-    detail: "4 位房客 · 48 小时内完成付款",
-  },
-];
-
 const messages = [];
+
+const guideLevelRules = [
+  { name: "资深导游", shortName: "资深", min: 500, className: "veteran" },
+  { name: "金牌导游", shortName: "金牌", min: 100, className: "gold" },
+  { name: "银牌导游", shortName: "银牌", min: 50, className: "silver" },
+  { name: "铜牌导游", shortName: "铜牌", min: 10, className: "bronze" },
+  { name: "实习导游", shortName: "实习", min: 0, className: "trainee" },
+];
 
 const categories = [
   ["全部", "sparkles"],
@@ -136,6 +125,7 @@ const categories = [
 
 const formatter = new Intl.NumberFormat("zh-CN");
 const authScreen = document.querySelector("#authScreen");
+const applePhoneScreen = document.querySelector("#applePhoneScreen");
 const registrationScreen = document.querySelector("#registrationScreen");
 const mobileApp = document.querySelector("#mobileApp");
 const appContent = document.querySelector("#appContent");
@@ -153,20 +143,31 @@ const state = {
   exploreDate: "",
   explorePreference: "",
   selectedExploreProductId: "",
+  orderDraft: null,
+  orderCompanions: [],
   user: JSON.parse(localStorage.getItem("staynestUser") || "null"),
   saved: new Set(JSON.parse(localStorage.getItem("staynestSaved") || "[]")),
   orders: JSON.parse(localStorage.getItem("staynestOrders") || "[]"),
+  activeTripOrderId: "",
   activeChatOrderId: "",
   chatThreads: JSON.parse(localStorage.getItem("staynestChatThreads") || "{}"),
+  chatReadState: JSON.parse(localStorage.getItem("staynestChatReadState") || "{}"),
+  chatTranslations: JSON.parse(localStorage.getItem("staynestChatTranslations") || "{}"),
   chatPollTimer: null,
+  messageThreadsRefreshing: false,
   availableOrders: [],
+  selectedGuideOrderId: "",
   guideOrderMessage: "",
   productOrderStatus: "",
   guideApplication: null,
   guideFormOpen: false,
+  profileEditOpen: false,
+  profileAvatarDraft: "",
   guideSyncing: false,
   guideStatusSyncing: false,
   guideSubmitting: false,
+  addressPickerProduct: null,
+  addressPickerRequestId: 0,
 };
 
 state.guideApplication = loadGuideApplicationForUser(state.user);
@@ -309,9 +310,13 @@ let exploreProducts = [
 const authState = {
   countdown: 0,
   timer: null,
+  appleCountdown: 0,
+  appleTimer: null,
   config: {},
   registrationToken: "",
   registrationPhone: "",
+  applePhoneToken: "",
+  appleSuggestedName: "",
 };
 
 const tabMeta = {
@@ -324,6 +329,7 @@ const tabMeta = {
 async function init() {
   loadAuthConfig();
   bindAuth();
+  bindApplePhone();
   bindRegistration();
   bindAppShell();
   document.querySelector("#dialogClose").addEventListener("click", () => listingDialog.close());
@@ -331,11 +337,19 @@ async function init() {
     if (event.target === listingDialog) listingDialog.close();
   });
 
-  await loadExploreProducts();
-  await loadRouteOrders();
-
   if (state.user) {
     enterApp();
+    syncSessionInBackground();
+    Promise.all([loadExploreProducts(), loadRouteOrders()]).then(() => {
+      if (state.user && state.tab !== "messages") {
+        setTab(state.tab);
+        refreshIcons();
+      }
+    });
+  } else {
+    document.documentElement.classList.remove("has-local-session");
+    await loadExploreProducts();
+    await loadRouteOrders();
   }
   refreshIcons();
   registerServiceWorker();
@@ -516,19 +530,24 @@ function bindAuth() {
 
     const loginButton = document.querySelector("#phoneLoginButton");
     loginButton.disabled = true;
-    loginButton.textContent = "正在登录...";
+    loginButton.textContent = authState.applePhoneToken ? "正在绑定..." : "正在登录...";
     setAuthMessage("正在校验验证码...", "success");
 
     try {
-      const result = await postJson("/api/auth/verify-code", { phone, code });
+      const result = await postJson("/api/auth/verify-code", { phone, code, applePhoneToken: authState.applePhoneToken || "" });
       if (result.requiresRegistration) {
         loginButton.disabled = false;
         loginButton.textContent = "手机号登录";
-        showRegistration(result.registrationToken, result.phone);
+        const suggestedName = result.name || authState.appleSuggestedName || "";
+        authState.applePhoneToken = "";
+        authState.appleSuggestedName = "";
+        showRegistration(result.registrationToken, result.phone, suggestedName);
         return;
       }
 
       localStorage.setItem("staynestToken", result.token);
+      authState.applePhoneToken = "";
+      authState.appleSuggestedName = "";
       setAuthMessage("验证通过，正在进入 StayNest。", "success");
       loginButton.disabled = false;
       loginButton.textContent = "手机号登录";
@@ -537,6 +556,101 @@ function bindAuth() {
       loginButton.disabled = false;
       loginButton.textContent = "手机号登录";
       setAuthMessage(error.message || "登录失败，请稍后重试。", "error");
+    }
+  });
+}
+
+function bindApplePhone() {
+  document.querySelector("#applePhoneBackButton").addEventListener("click", () => {
+    resetApplePhoneForm();
+    applePhoneScreen.classList.add("hidden");
+    authScreen.classList.remove("hidden");
+    refreshIcons();
+  });
+
+  document.querySelector("#appleSendCodeButton").addEventListener("click", async () => {
+    const phone = getAppleFullPhoneNumber();
+    if (!validatePhone(phone)) {
+      setApplePhoneMessage("请输入有效手机号。", "error");
+      document.querySelector("#applePhoneInput").focus();
+      return;
+    }
+
+    const button = document.querySelector("#appleSendCodeButton");
+    button.disabled = true;
+    button.textContent = "发送中...";
+    setApplePhoneMessage("正在发送验证码...", "success");
+
+    try {
+      const result = await postJson("/api/auth/send-code", { phone });
+      const devTip = result.devCode ? ` 开发验证码：${result.devCode}` : "";
+      setApplePhoneMessage(`${result.message || "验证码已发送。"}${devTip}`, "success");
+      startAppleCodeCountdown(result.retryAfter || 60);
+      document.querySelector("#appleCodeInput").focus();
+    } catch (error) {
+      setApplePhoneMessage(error.message || "验证码发送失败。", "error");
+      updateAppleSendCodeButton();
+    }
+  });
+
+  document.querySelector("#applePhoneInput").addEventListener("input", () => {
+    setApplePhoneMessage("", "");
+  });
+
+  document.querySelector("#appleCodeInput").addEventListener("input", (event) => {
+    event.target.value = event.target.value.replace(/\D/g, "").slice(0, 6);
+    setApplePhoneMessage("", "");
+  });
+
+  document.querySelector("#applePhoneForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const phone = getAppleFullPhoneNumber();
+    const code = document.querySelector("#appleCodeInput").value.trim();
+
+    if (!authState.applePhoneToken) {
+      setApplePhoneMessage("Apple ID 验证已过期，请返回重新登录。", "error");
+      return;
+    }
+
+    if (!validatePhone(phone)) {
+      setApplePhoneMessage("请输入有效手机号。", "error");
+      document.querySelector("#applePhoneInput").focus();
+      return;
+    }
+
+    if (code.length !== 6) {
+      setApplePhoneMessage("请输入 6 位验证码。", "error");
+      document.querySelector("#appleCodeInput").focus();
+      return;
+    }
+
+    const button = document.querySelector("#applePhoneSubmitButton");
+    button.disabled = true;
+    button.textContent = "正在绑定...";
+    setApplePhoneMessage("正在校验验证码...", "success");
+
+    try {
+      const result = await postJson("/api/auth/verify-code", {
+        phone,
+        code,
+        applePhoneToken: authState.applePhoneToken,
+      });
+      if (result.requiresRegistration) {
+        const suggestedName = result.name || authState.appleSuggestedName || "";
+        resetApplePhoneForm();
+        showRegistration(result.registrationToken, result.phone, suggestedName);
+        setRegistrationMessage("手机号已绑定，请完善资料后进入 StayNest。", "success");
+        return;
+      }
+
+      localStorage.setItem("staynestToken", result.token);
+      resetApplePhoneForm();
+      login(result.user);
+    } catch (error) {
+      setApplePhoneMessage(error.message || "绑定失败，请稍后重试。", "error");
+    } finally {
+      button.disabled = false;
+      button.textContent = "绑定并继续";
     }
   });
 }
@@ -601,6 +715,7 @@ function showRegistration(registrationToken, label, suggestedName = "") {
   authState.registrationToken = registrationToken || "";
   authState.registrationPhone = label || "";
   authScreen.classList.add("hidden");
+  applePhoneScreen.classList.add("hidden");
   mobileApp.classList.add("hidden");
   registrationScreen.classList.remove("hidden");
   const verifiedLabel = label || "手机号";
@@ -705,6 +820,10 @@ function makeNonce() {
 
 async function finishAppleSignIn(identityToken, name = "") {
   const result = await postJson("/api/auth/apple", { identityToken, name });
+  if (result.requiresPhoneVerification) {
+    showApplePhoneBinding(result, name);
+    return;
+  }
   if (result.requiresRegistration) {
     showRegistration(result.registrationToken, result.registrationLabel || "Apple ID 已验证", result.name || name);
     setRegistrationMessage("请先完善资料，完成后即可进入 StayNest。", "success");
@@ -739,6 +858,12 @@ function getFullPhoneNumber() {
   return `${countryCode} ${phone}`;
 }
 
+function getAppleFullPhoneNumber() {
+  const countryCode = document.querySelector("#appleCountryCodeInput").value;
+  const phone = document.querySelector("#applePhoneInput").value.replace(/[^\d]/g, "");
+  return `${countryCode} ${phone}`;
+}
+
 function getTodayDate() {
   const date = new Date();
   const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000);
@@ -757,6 +882,13 @@ function setAuthMessage(text, type) {
   message.classList.toggle("success", type === "success");
 }
 
+function setApplePhoneMessage(text, type) {
+  const message = document.querySelector("#applePhoneMessage");
+  message.textContent = text;
+  message.classList.toggle("error", type === "error");
+  message.classList.toggle("success", type === "success");
+}
+
 function startCodeCountdown(seconds = 60) {
   authState.countdown = seconds;
   updateSendCodeButton();
@@ -770,11 +902,49 @@ function startCodeCountdown(seconds = 60) {
   }, 1000);
 }
 
+function showApplePhoneBinding(result, fallbackName = "") {
+  resetApplePhoneForm();
+  authState.applePhoneToken = result.applePhoneToken || "";
+  authState.appleSuggestedName = result.name || fallbackName || "";
+  authScreen.classList.add("hidden");
+  registrationScreen.classList.add("hidden");
+  mobileApp.classList.add("hidden");
+  applePhoneScreen.classList.remove("hidden");
+  setApplePhoneMessage("Apple ID 已验证，请绑定手机号继续。", "success");
+  document.querySelector("#applePhoneInput").focus();
+  refreshIcons();
+}
+
+function startAppleCodeCountdown(seconds = 60) {
+  authState.appleCountdown = seconds;
+  updateAppleSendCodeButton();
+  window.clearInterval(authState.appleTimer);
+  authState.appleTimer = window.setInterval(() => {
+    authState.appleCountdown -= 1;
+    updateAppleSendCodeButton();
+    if (authState.appleCountdown <= 0) {
+      window.clearInterval(authState.appleTimer);
+    }
+  }, 1000);
+}
+
 function updateSendCodeButton() {
   const button = document.querySelector("#sendCodeButton");
   if (authState.countdown > 0) {
     button.disabled = true;
     button.textContent = `${authState.countdown}s`;
+    return;
+  }
+
+  button.disabled = false;
+  button.textContent = authState.applePhoneToken ? "发送绑定验证码" : "发送验证码";
+}
+
+function updateAppleSendCodeButton() {
+  const button = document.querySelector("#appleSendCodeButton");
+  if (authState.appleCountdown > 0) {
+    button.disabled = true;
+    button.textContent = `${authState.appleCountdown}s`;
     return;
   }
 
@@ -786,11 +956,26 @@ function resetAuthForm() {
   window.clearInterval(authState.timer);
   authState.countdown = 0;
   authState.timer = null;
+  authState.applePhoneToken = "";
+  authState.appleSuggestedName = "";
   document.querySelector("#phoneLoginForm").reset();
   document.querySelector("#phoneLoginButton").disabled = false;
   document.querySelector("#phoneLoginButton").textContent = "手机号登录";
   updateSendCodeButton();
   setAuthMessage("", "");
+}
+
+function resetApplePhoneForm() {
+  window.clearInterval(authState.appleTimer);
+  authState.appleCountdown = 0;
+  authState.appleTimer = null;
+  authState.applePhoneToken = "";
+  authState.appleSuggestedName = "";
+  document.querySelector("#applePhoneForm").reset();
+  document.querySelector("#applePhoneSubmitButton").disabled = false;
+  document.querySelector("#applePhoneSubmitButton").textContent = "绑定并继续";
+  updateAppleSendCodeButton();
+  setApplePhoneMessage("", "");
 }
 
 function resetRegistrationForm() {
@@ -812,6 +997,8 @@ function login(user) {
   state.user = user;
   state.guideApplication = loadGuideApplicationForUser(user);
   state.guideFormOpen = false;
+  state.profileEditOpen = false;
+  state.profileAvatarDraft = "";
   localStorage.setItem("staynestUser", JSON.stringify(user));
   enterApp();
   loadRouteOrders().then(() => {
@@ -822,6 +1009,43 @@ function login(user) {
   });
 }
 
+async function syncSessionInBackground() {
+  const token = localStorage.getItem("staynestToken") || "";
+  if (!state.user || !token) return;
+
+  try {
+    const result = await getJson("/api/auth/session", { Authorization: `Bearer ${token}` });
+    if (result.user) applySessionUser(result.user);
+    return;
+  } catch {
+    // Try a silent restore below; opening the app should stay fast and calm.
+  }
+
+  try {
+    const result = await postJson("/api/auth/restore-session", {
+      phone: state.user?.phone || "",
+      email: state.user?.email || "",
+      appleSub: state.user?.appleSub || "",
+    });
+    if (result.token) localStorage.setItem("staynestToken", result.token);
+    if (result.user) applySessionUser(result.user);
+  } catch {
+    // Keep the local session visible; actions that truly need login can ask later.
+  }
+}
+
+function applySessionUser(user) {
+  state.user = { ...(state.user || {}), ...user };
+  state.guideApplication = loadGuideApplicationForUser(state.user);
+  localStorage.setItem("staynestUser", JSON.stringify(state.user));
+  updateHeaderAvatar();
+  if (state.tab === "profile") {
+    renderProfile();
+  } else {
+    updateMessageUnreadBadge();
+  }
+}
+
 function logout() {
   state.user = null;
   state.guideApplication = null;
@@ -830,21 +1054,67 @@ function logout() {
   localStorage.removeItem("staynestUser");
   localStorage.removeItem("staynestToken");
   localStorage.removeItem("staynestOrders");
+  document.documentElement.classList.remove("has-local-session");
   mobileApp.classList.add("hidden");
+  applePhoneScreen.classList.add("hidden");
   registrationScreen.classList.add("hidden");
   authScreen.classList.remove("hidden");
   resetAuthForm();
+  resetApplePhoneForm();
   resetRegistrationForm();
   refreshIcons();
 }
 
+function showLogoutConfirmDialog() {
+  closeLogoutConfirmDialog();
+  const displayName = state.user?.nickname || state.user?.name || "当前账号";
+  const overlay = document.createElement("section");
+  overlay.className = "logout-confirm-overlay";
+  overlay.id = "logoutConfirmOverlay";
+  overlay.setAttribute("aria-label", "确认退出登录");
+  overlay.innerHTML = `
+    <div class="logout-confirm-dialog" role="dialog" aria-modal="true">
+      <span class="logout-confirm-icon"><i data-lucide="log-out"></i></span>
+      <div class="logout-confirm-copy">
+        <h3>确认退出登录？</h3>
+        <p>退出后，${escapeHtml(displayName)}需要重新登录才能继续查看行程、消息和个人资料。</p>
+      </div>
+      <div class="logout-confirm-actions">
+        <button class="ghost-button" id="logoutCancelButton" type="button">取消</button>
+        <button class="primary-button logout-confirm-button" id="logoutConfirmButton" type="button">确认退出</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  refreshIcons();
+
+  const closeOnEscape = (event) => {
+    if (event.key === "Escape") closeLogoutConfirmDialog();
+  };
+  window.addEventListener("keydown", closeOnEscape, { once: true });
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeLogoutConfirmDialog();
+  });
+  overlay.querySelector("#logoutCancelButton").addEventListener("click", closeLogoutConfirmDialog);
+  overlay.querySelector("#logoutConfirmButton").addEventListener("click", () => {
+    closeLogoutConfirmDialog();
+    logout();
+  });
+}
+
+function closeLogoutConfirmDialog() {
+  document.querySelector("#logoutConfirmOverlay")?.remove();
+}
+
 function enterApp() {
   authScreen.classList.add("hidden");
+  applePhoneScreen.classList.add("hidden");
   registrationScreen.classList.add("hidden");
   mobileApp.classList.remove("hidden");
-  avatarInitial.textContent = (state.user?.nickname || state.user?.name || "Y").slice(0, 1).toUpperCase();
+  updateHeaderAvatar();
   setTab(state.tab);
   refreshGuideApplicationFromServer();
+  loadRouteOrders().then(() => refreshMessageThreadsForOrders());
 }
 
 function getGuideStorageKey(user = state.user) {
@@ -887,6 +1157,9 @@ function setTab(tab) {
   if (tab !== "messages") {
     stopChatPolling();
   }
+  if (tab !== "trips") {
+    state.activeTripOrderId = "";
+  }
   state.tab = tab;
   const [title, overline] = tabMeta[tab];
   headerTitle.textContent = title;
@@ -903,6 +1176,7 @@ function setTab(tab) {
   };
   renderers[tab]();
   refreshIcons();
+  updateMessageUnreadBadge();
 }
 
 function renderSearch() {
@@ -997,15 +1271,61 @@ function renderSearch() {
   });
 }
 
+function getGuideReviewStatus(application = state.guideApplication, user = state.user) {
+  return application?.reviewStatus || application?.status || user?.guideStatus || "";
+}
+
+function hasGuideApplicationStatus(status) {
+  return Boolean(status && status !== "未申请");
+}
+
 function isApprovedGuide() {
-  const status = state.guideApplication?.reviewStatus || state.guideApplication?.status || "";
-  return status === "已通过";
+  return getGuideReviewStatus() === "已通过";
+}
+
+function getGuideCompletedOrderCount() {
+  const localFinished = state.orders
+    .map(normalizeRouteOrder)
+    .filter((order) => {
+      if (order.status !== "已完成") return false;
+      const userPhone = String(state.user?.phone || state.guideApplication?.phone || "").replace(/[^\d]/g, "");
+      const guidePhone = String(order.guidePhone || "").replace(/[^\d]/g, "");
+      const userNames = new Set([
+        String(state.user?.nickname || "").trim(),
+        String(state.user?.name || "").trim(),
+        String(state.guideApplication?.realName || "").trim(),
+        String(state.guideApplication?.applicantName || "").trim(),
+      ].filter(Boolean));
+      return Boolean((userPhone && guidePhone === userPhone) || userNames.has(String(order.guideName || "").trim()));
+    }).length;
+  return Math.max(localFinished, Number(state.user?.guideCompletedOrders || 0));
+}
+
+function getGuideLevelInfo(completedOrders) {
+  const current = guideLevelRules.find((rule) => completedOrders >= rule.min) || guideLevelRules[guideLevelRules.length - 1];
+  const ascending = [...guideLevelRules].reverse();
+  const next = ascending.find((rule) => rule.min > completedOrders) || null;
+  return {
+    ...current,
+    completedOrders,
+    nextName: next?.name || "",
+    nextMin: next?.min || current.min,
+    remaining: next ? Math.max(0, next.min - completedOrders) : 0,
+  };
+}
+
+function renderGuideLevelBadge(levelInfo) {
+  if (!levelInfo?.name) return "";
+  return `<span class="guide-level-badge ${escapeHtml(levelInfo.className)}">${escapeHtml(levelInfo.shortName)}</span>`;
 }
 
 async function loadAvailableOrders() {
   try {
     const result = await getJson("/api/orders/available");
     state.availableOrders = Array.isArray(result.orders) ? result.orders.map(normalizeRouteOrder) : [];
+    if (state.selectedGuideOrderId && !state.availableOrders.some((order) => order.id === state.selectedGuideOrderId)) {
+      state.selectedGuideOrderId = "";
+    }
   } catch {
     state.availableOrders = [];
   }
@@ -1022,6 +1342,12 @@ function renderGuideExplore() {
 }
 
 function renderGuideExploreContent() {
+  const selectedOrder = state.availableOrders.find((order) => order.id === state.selectedGuideOrderId);
+  if (selectedOrder) {
+    renderGuideOrderDetail(selectedOrder);
+    return;
+  }
+
   appContent.innerHTML = `
     <section class="guide-order-head">
       <div>
@@ -1049,20 +1375,25 @@ function renderGuideExploreContent() {
   document.querySelector("#refreshGuideOrdersButton").addEventListener("click", async () => {
     await loadAvailableOrders();
     state.guideOrderMessage = "";
+    state.selectedGuideOrderId = "";
     renderGuideExploreContent();
     refreshIcons();
   });
 
   document.querySelector(".guide-order-list").addEventListener("click", async (event) => {
-    const button = event.target.closest("[data-grab-order]");
-    if (!button) return;
-    await grabGuideOrder(button.dataset.grabOrder);
+    const orderTarget = event.target.closest("[data-view-guide-order]");
+    if (!orderTarget) return;
+    state.selectedGuideOrderId = orderTarget.dataset.viewGuideOrder;
+    state.guideOrderMessage = "";
+    renderGuideExploreContent();
+    refreshIcons();
+    appContent.scrollTo({ top: 0, behavior: "smooth" });
   });
 }
 
 function renderGuideOrderCard(order) {
   return `
-    <article class="guide-order-card">
+    <article class="guide-order-card" data-view-guide-order="${escapeHtml(order.id)}">
       <div class="guide-order-card-body">
         <div class="guide-order-main">
           <div class="guide-order-title-row">
@@ -1079,15 +1410,119 @@ function renderGuideOrderCard(order) {
             <small>${escapeHtml(order.travelerPhone || "手机号未留")}</small>
           </section>
         </div>
-        <button class="primary-button guide-grab-button" type="button" data-grab-order="${escapeHtml(order.id)}">抢单</button>
+        <button class="ghost-button guide-grab-button" type="button" data-view-guide-order="${escapeHtml(order.id)}">详情</button>
       </div>
     </article>
   `;
 }
 
+function renderGuideOrderDetail(order) {
+  const product = getProductForOrder(order);
+  appContent.innerHTML = `
+    <section class="guide-order-detail">
+      <button class="ghost-button guide-detail-back" id="guideOrderBackButton" type="button">
+        <i data-lucide="chevron-left"></i>
+        返回订单
+      </button>
+
+      <div class="guide-detail-hero">
+        <span class="overline">订单详情</span>
+        <h3>${escapeHtml(order.productTitle)}</h3>
+        <p>${escapeHtml(order.destination || "目的地")} · ${escapeHtml(order.preference || "偏好")} · ${escapeHtml(order.duration || "行程")}</p>
+        <strong>¥${formatter.format(order.price)} / 人</strong>
+      </div>
+
+      <section class="guide-detail-grid">
+        <div>
+          <span>出行日期</span>
+          <strong>${escapeHtml(order.travelDate || "未选日期")}</strong>
+        </div>
+        <div>
+          <span>目的地</span>
+          <strong>${escapeHtml(order.destination || "未填写")}</strong>
+        </div>
+        <div>
+          <span>下榻住所</span>
+          <strong>${escapeHtml(order.lodgingAddress || "未填写")}</strong>
+        </div>
+        <div>
+          <span>行程路线</span>
+          <strong>${escapeHtml(order.productTitle)}</strong>
+        </div>
+        <div>
+          <span>下单人</span>
+          <strong>${escapeHtml(order.travelerName || "游客")}</strong>
+          <small>${escapeHtml(order.travelerPhone || "手机号未留")}</small>
+        </div>
+        <div>
+          <span>支付状态</span>
+          <strong>${escapeHtml(order.paymentStatus || order.status || "已支付")}</strong>
+          <small>${escapeHtml(order.paymentMethod || "线上支付")}</small>
+        </div>
+      </section>
+
+      <section class="guide-detail-section">
+        <h4>出行人员与备注</h4>
+        <p><strong>主要出行人：</strong>${escapeHtml(order.travelerName || "游客")}${order.travelerIdInfo ? ` · 证件：${escapeHtml(order.travelerIdInfo)}` : ""}</p>
+        <p><strong>同行人：</strong>${escapeHtml(order.companionInfo || "未填写")}</p>
+        <p><strong>饮食及过敏源：</strong>${escapeHtml(order.dietaryNotes || "未填写")}</p>
+        <p><strong>其他备注：</strong>${escapeHtml(order.orderRemark || "无")}</p>
+      </section>
+
+      ${
+        product
+          ? `
+            <section class="guide-detail-section">
+              <h4>路线亮点</h4>
+              <div class="guide-detail-tags">
+                ${(product.highlights?.length ? product.highlights : [product.destination, product.preference].filter(Boolean)).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+              </div>
+            </section>
+            <section class="guide-detail-section">
+              <h4>主要地点</h4>
+              <p>${escapeHtml(product.spots?.length ? product.spots.join("、") : order.destination || "未填写")}</p>
+            </section>
+            <section class="guide-detail-section">
+              <h4>行程介绍</h4>
+              <div class="guide-detail-body">${renderRouteBodyBlocks(product)}</div>
+            </section>
+          `
+          : `
+            <section class="guide-detail-section">
+              <h4>行程介绍</h4>
+              <p>${escapeHtml(order.destination || "目的地")} · ${escapeHtml(order.duration || "行程")}，请确认日期和下单人信息后再同行。</p>
+            </section>
+          `
+      }
+
+      <p class="auth-message ${state.guideOrderMessage ? "error" : ""}" id="guideOrderMessage" role="status" aria-live="polite">${escapeHtml(state.guideOrderMessage)}</p>
+      <button class="primary-button guide-confirm-button" id="guideConfirmOrderButton" type="button">确认同行</button>
+    </section>
+  `;
+
+  document.querySelector("#guideOrderBackButton").addEventListener("click", () => {
+    state.selectedGuideOrderId = "";
+    state.guideOrderMessage = "";
+    renderGuideExploreContent();
+    refreshIcons();
+  });
+  document.querySelector("#guideConfirmOrderButton").addEventListener("click", async () => {
+    await grabGuideOrder(order.id);
+  });
+}
+
+function getProductForOrder(order) {
+  return exploreProducts.find((product) => product.id === order.productId || product.title === order.productTitle) || null;
+}
+
 async function grabGuideOrder(orderId) {
   const order = state.availableOrders.find((item) => item.id === orderId);
   if (!order) return;
+  const button = document.querySelector("#guideConfirmOrderButton");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "确认中...";
+  }
   const token = localStorage.getItem("staynestToken") || "";
   try {
     const result = await postJson(
@@ -1102,7 +1537,8 @@ async function grabGuideOrder(orderId) {
     const grabbedOrder = normalizeRouteOrder(result.order || order);
     upsertRouteOrder(grabbedOrder);
     state.availableOrders = state.availableOrders.filter((item) => item.id !== orderId);
-    state.guideOrderMessage = `已抢到「${order.productTitle}」订单。`;
+    state.selectedGuideOrderId = "";
+    state.guideOrderMessage = `已确认同行，「${order.productTitle}」已形成正式行程。`;
   } catch (error) {
     state.guideOrderMessage = error.message || "抢单失败，请刷新后重试。";
   }
@@ -1221,7 +1657,7 @@ function renderExploreProductDetail(product) {
             <span>指定出行日期</span>
             <input id="routeOrderDateInput" type="date" min="${getTodayDate()}" value="${escapeHtml(selectedDate)}" />
           </label>
-          <button class="primary-button" id="routeOrderButton" type="submit">立即下单</button>
+          <button class="primary-button" id="routeOrderButton" type="submit">确认行程</button>
           <p class="auth-message" id="routeOrderMessage" role="status" aria-live="polite">${escapeHtml(state.productOrderStatus)}</p>
         </form>
       </div>
@@ -1234,14 +1670,239 @@ function renderExploreProductDetail(product) {
     renderSearch();
     refreshIcons();
   });
-  document.querySelector("#routeOrderForm").addEventListener("submit", (event) => createRouteOrder(event, product));
+  document.querySelector("#routeOrderForm").addEventListener("submit", (event) => openRouteOrderConfirmation(event, product));
 }
 
-async function createRouteOrder(event, product) {
+function bindRouteOrderAddressTools(product) {
+  const input = document.querySelector("#routeOrderAddressInput");
+  const locationButton = document.querySelector("#routeUseLocationButton");
+  if (!input || !locationButton) return;
+
+  const openPicker = () => openAddressPicker(product);
+  input.addEventListener("click", openPicker);
+  input.addEventListener("focus", openPicker);
+  input.parentElement?.addEventListener("click", (event) => {
+    if (event.target.closest("#routeUseLocationButton")) return;
+    openPicker();
+  });
+  locationButton.addEventListener("click", openPicker);
+}
+
+function openAddressPicker(product) {
+  closeAddressPicker();
+  state.addressPickerProduct = product;
+
+  const currentAddress = document.querySelector("#routeOrderAddressInput")?.value.trim() || "";
+  const overlay = document.createElement("section");
+  overlay.className = "address-picker-overlay";
+  overlay.id = "addressPickerOverlay";
+  overlay.setAttribute("aria-label", "选择接送地址");
+  overlay.innerHTML = `
+    <div class="address-picker-sheet" role="dialog" aria-modal="true">
+      <header class="address-picker-head">
+        <button class="icon-button" id="addressPickerClose" type="button" aria-label="关闭地址选择">
+          <i data-lucide="chevron-left"></i>
+        </button>
+        <strong>选择接送地址</strong>
+        <span></span>
+      </header>
+
+      <div class="address-search-panel">
+        <label class="address-search-field">
+          <i data-lucide="search"></i>
+          <input id="addressPickerInput" type="search" maxlength="80" placeholder="搜索酒店、民宿、小区或街道" value="${escapeHtml(currentAddress)}" autocomplete="street-address" />
+        </label>
+        <button class="address-current-button" id="addressUseCurrentButton" type="button">
+          <span><i data-lucide="crosshair"></i></span>
+          <div>
+            <strong>使用当前定位</strong>
+            <small>自动获取附近地址，仍可手动修改门牌</small>
+          </div>
+        </button>
+      </div>
+
+      <div class="address-picker-status" id="addressPickerStatus" role="status" aria-live="polite"></div>
+      <div class="address-picker-list" id="addressPickerList"></div>
+
+      <footer class="address-picker-footer">
+        <button class="ghost-button" id="addressUseTypedButton" type="button">使用输入内容</button>
+      </footer>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+  refreshIcons();
+
+  const searchInput = overlay.querySelector("#addressPickerInput");
+  const list = overlay.querySelector("#addressPickerList");
+  const status = overlay.querySelector("#addressPickerStatus");
+  const closeButton = overlay.querySelector("#addressPickerClose");
+  const currentButton = overlay.querySelector("#addressUseCurrentButton");
+  const typedButton = overlay.querySelector("#addressUseTypedButton");
+
+  const showRows = (rows) => {
+    list.innerHTML = rows.length
+      ? rows.map((address) => renderAddressPickerRow(address)).join("")
+      : `<p class="address-empty">输入酒店、民宿或街区关键词后选择具体地址。</p>`;
+    refreshIcons();
+  };
+
+  const loadRows = async () => {
+    const keyword = searchInput.value.trim();
+    const requestId = ++state.addressPickerRequestId;
+    const localRows = keyword ? getAddressSuggestions(keyword, product) : getDefaultAddressSuggestions(product);
+    showRows(localRows);
+    status.textContent = keyword ? "正在搜索附近地址..." : "";
+    if (!keyword) return;
+
+    try {
+      const result = await getJson(`/api/places/suggest?keyword=${encodeURIComponent(keyword)}&city=${encodeURIComponent(product.destination || "")}`);
+      if (requestId !== state.addressPickerRequestId) return;
+      const mergedRows = Array.from(new Set([...(result.suggestions || []), ...localRows])).slice(0, 12);
+      showRows(mergedRows);
+      status.textContent = mergedRows.length ? "" : "没有找到匹配地址，可直接使用输入内容。";
+    } catch {
+      if (requestId === state.addressPickerRequestId) status.textContent = "地图服务暂时不可用，已显示本地建议。";
+    }
+  };
+
+  searchInput.addEventListener("input", loadRows);
+  closeButton.addEventListener("click", closeAddressPicker);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeAddressPicker();
+  });
+  list.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-picker-address]");
+    if (!row) return;
+    applyPickedAddress(row.dataset.pickerAddress);
+  });
+  typedButton.addEventListener("click", () => {
+    const typedAddress = searchInput.value.trim();
+    if (!typedAddress) {
+      status.textContent = "请先输入或选择一个接送地址。";
+      return;
+    }
+    applyPickedAddress(typedAddress);
+  });
+  currentButton.addEventListener("click", () => fillAddressFromCurrentLocation(searchInput, currentButton, { keepPickerOpen: true, onLocated: loadRows }));
+
+  loadRows();
+  window.setTimeout(() => searchInput.focus({ preventScroll: true }), 80);
+}
+
+function renderAddressPickerRow(address) {
+  const [main, ...rest] = String(address || "").split(/\s+/).filter(Boolean);
+  const detail = rest.join(" ");
+  return `
+    <button class="address-result-row" type="button" data-picker-address="${escapeHtml(address)}">
+      <i data-lucide="map-pin"></i>
+      <span>
+        <strong>${escapeHtml(detail || main || address)}</strong>
+        <small>${escapeHtml(detail ? main : address)}</small>
+      </span>
+      <i data-lucide="chevron-right"></i>
+    </button>
+  `;
+}
+
+function getDefaultAddressSuggestions(product) {
+  const city = product.destination || "成都";
+  const spots = Array.isArray(product.spots) ? product.spots : [];
+  const rows = [
+    `${city}市中心酒店`,
+    `${city}春熙路附近酒店`,
+    `${city}太古里附近酒店`,
+    `${city}民宿`,
+    ...spots.flatMap((spot) => [`${city}${spot}附近酒店`, `${city}${spot}游客中心`]),
+  ];
+  return Array.from(new Set(rows)).slice(0, 8);
+}
+
+function applyPickedAddress(address) {
+  const input = document.querySelector("#routeOrderAddressInput");
+  if (!input) return;
+  input.value = String(address || "").trim();
+  closeAddressPicker();
+  showRouteOrderMessage("已选择接送地址。", "success");
+}
+
+function closeAddressPicker() {
+  document.querySelector("#addressPickerOverlay")?.remove();
+}
+
+function getAddressSuggestions(keyword, product) {
+  const query = String(keyword || "").trim();
+  if (!query) return [];
+  const city = product.destination || "成都";
+  const spots = Array.isArray(product.spots) ? product.spots : [];
+  const commonPlaces = [
+    `${city}${query}`,
+    `${city}${query}酒店`,
+    `${city}${query}民宿`,
+    `${city}${query}附近`,
+    `${city}${query}地铁站`,
+    `${city}${query}游客中心`,
+    ...spots.flatMap((spot) => [
+      `${city}${spot}附近酒店`,
+      `${city}${spot}游客中心`,
+      `${city}${spot}地铁站`,
+    ]),
+  ];
+  return Array.from(new Set(commonPlaces))
+    .filter((address) => address.includes(query))
+    .slice(0, 6);
+}
+
+function fillAddressFromCurrentLocation(input, button, options = {}) {
+  if (!navigator.geolocation) {
+    showRouteOrderMessage("当前设备不支持定位，请手动输入下榻住所地址。", "error");
+    return;
+  }
+
+  const originalHtml = button.innerHTML;
+  button.disabled = true;
+  button.classList.add("is-loading");
+  button.innerHTML = `<span><i data-lucide="loader-circle"></i></span><div><strong>定位中...</strong><small>正在获取当前位置</small></div>`;
+  refreshIcons();
+  navigator.geolocation.getCurrentPosition(
+    async (position) => {
+      const latitude = position.coords.latitude.toFixed(6);
+      const longitude = position.coords.longitude.toFixed(6);
+      let address = "";
+      try {
+        const result = await getJson(`/api/places/reverse?lat=${encodeURIComponent(latitude)}&lng=${encodeURIComponent(longitude)}`);
+        address = result.address || "";
+      } catch {
+        address = "";
+      }
+      input.value = address || `当前位置：${latitude}, ${longitude}`;
+      showRouteOrderMessage(address ? "已定位到当前地址。" : "已获取当前位置坐标，请补充具体门牌或酒店名称。", address ? "success" : "");
+      button.disabled = false;
+      button.classList.remove("is-loading");
+      button.innerHTML = originalHtml;
+      refreshIcons();
+      if (typeof options.onLocated === "function") {
+        options.onLocated(address);
+      }
+      if (!options.keepPickerOpen && address) {
+        applyPickedAddress(address);
+      }
+    },
+    (error) => {
+      const message = error.code === error.PERMISSION_DENIED ? "定位权限未开启，请在系统设置中允许 StayNest 使用位置。" : "定位失败，请手动输入下榻住所地址。";
+      showRouteOrderMessage(message, "error");
+      button.disabled = false;
+      button.classList.remove("is-loading");
+      button.innerHTML = originalHtml;
+      refreshIcons();
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 },
+  );
+}
+
+function openRouteOrderConfirmation(event, product) {
   event.preventDefault();
   const dateInput = document.querySelector("#routeOrderDateInput");
-  const message = document.querySelector("#routeOrderMessage");
-  const button = document.querySelector("#routeOrderButton");
   const travelDate = dateInput.value;
 
   if (!travelDate) {
@@ -1254,8 +1915,273 @@ async function createRouteOrder(event, product) {
   }
 
   state.exploreDate = travelDate;
+  state.orderDraft = { productId: product.id, travelDate };
+  renderRouteOrderConfirmation(product, travelDate);
+  refreshIcons();
+  appContent.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function renderRouteOrderConfirmation(product, travelDate) {
+  state.orderCompanions = [];
+  appContent.innerHTML = `
+    <button class="back-button route-detail-back" id="orderConfirmBack" type="button">
+      <i data-lucide="arrow-left"></i>
+      返回行程
+    </button>
+
+    <section class="order-confirm-page">
+      <div class="order-confirm-head">
+        <span class="overline">订单确认</span>
+        <h2>${escapeHtml(product.title)}</h2>
+        <p>${escapeHtml(travelDate)} 出行 · ${escapeHtml(product.destination)} · ${escapeHtml(product.duration)}</p>
+        <strong>¥${formatter.format(product.price)} / 人</strong>
+      </div>
+
+      <form class="order-confirm-form" id="orderConfirmForm">
+        <section>
+          <h3>出行人员</h3>
+          <label>
+            <span>主要出行人姓名</span>
+            <input id="orderTravelerNameInput" type="text" maxlength="40" value="${escapeHtml(state.user?.nickname || state.user?.name || "")}" placeholder="请输入姓名" />
+          </label>
+          <label>
+            <span>主要出行人证件信息</span>
+            <input id="orderTravelerIdInput" type="text" maxlength="80" autocomplete="off" placeholder="请输入身份证、护照或其他有效证件号" />
+          </label>
+          <div class="companion-picker">
+            <div class="companion-picker-head">
+              <span>同行人信息</span>
+              <button class="icon-button companion-add-button" id="orderAddCompanionButton" type="button" aria-label="添加同行人">
+                <i data-lucide="plus"></i>
+              </button>
+            </div>
+            <div class="companion-list" id="orderCompanionList"></div>
+          </div>
+        </section>
+
+        <section>
+          <h3>联系方式与接送</h3>
+          <label>
+            <span>有效联系方式</span>
+            <input id="orderContactPhoneInput" type="tel" maxlength="32" value="${escapeHtml(state.user?.phone || "")}" placeholder="请输入手机号或微信号" />
+          </label>
+          <label>
+            <span>接送地址</span>
+            <div class="route-address-field">
+              <input id="routeOrderAddressInput" type="text" maxlength="120" placeholder="请选择酒店、民宿或街区地址" autocomplete="street-address" readonly />
+              <button class="ghost-button" id="routeUseLocationButton" type="button">
+                <i data-lucide="map-pin"></i>
+                选择
+              </button>
+            </div>
+          </label>
+        </section>
+
+        <section>
+          <h3>出行备注</h3>
+          <label>
+            <span>饮食及过敏源</span>
+            <textarea id="orderDietInput" maxlength="300" rows="3" placeholder="例如：不吃辣、海鲜过敏、素食等；没有可填写“无”"></textarea>
+          </label>
+          <label>
+            <span>其他备注信息</span>
+            <textarea id="orderRemarkInput" maxlength="500" rows="4" placeholder="例如：需要儿童座椅、老人同行、希望慢节奏游览等"></textarea>
+          </label>
+        </section>
+
+        <p class="auth-message" id="routeOrderMessage" role="status" aria-live="polite"></p>
+        <div class="payment-actions">
+          <button class="primary-button" type="submit" data-payment-method="支付宝">支付宝支付</button>
+          <button class="primary-button alt-pay-button" type="submit" data-payment-method="微信支付">微信支付</button>
+        </div>
+      </form>
+    </section>
+  `;
+
+  document.querySelector("#orderConfirmBack").addEventListener("click", () => {
+    state.orderDraft = null;
+    state.orderCompanions = [];
+    renderExploreProductDetail(product);
+    refreshIcons();
+  });
+  document.querySelector("#orderConfirmForm").addEventListener("submit", (event) => createRouteOrder(event, product, travelDate));
+  document.querySelector("#orderAddCompanionButton").addEventListener("click", () => openCompanionEditor());
+  bindRouteOrderAddressTools(product);
+  renderOrderCompanionList();
+}
+
+function renderOrderCompanionList() {
+  const list = document.querySelector("#orderCompanionList");
+  if (!list) return;
+
+  if (!state.orderCompanions.length) {
+    list.innerHTML = `<p class="companion-empty">暂无同行人，点击右侧 + 添加</p>`;
+    return;
+  }
+
+  list.innerHTML = state.orderCompanions
+    .map(
+      (person, index) => `
+        <article class="companion-item">
+          <span class="companion-index">${index + 1}</span>
+          <div>
+            <strong>${escapeHtml(person.name)}</strong>
+            <p>${escapeHtml([person.type, `证件：${person.idInfo}`, person.note].filter(Boolean).join(" · "))}</p>
+          </div>
+          <button class="icon-button companion-remove-button" type="button" data-remove-companion="${index}" aria-label="删除同行人">
+            <i data-lucide="x"></i>
+          </button>
+        </article>
+      `,
+    )
+    .join("");
+
+  list.querySelectorAll("[data-remove-companion]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number(button.dataset.removeCompanion);
+      state.orderCompanions.splice(index, 1);
+      renderOrderCompanionList();
+      refreshIcons();
+    });
+  });
+  refreshIcons();
+}
+
+function openCompanionEditor() {
+  closeCompanionEditor();
+  const overlay = document.createElement("section");
+  overlay.className = "companion-editor-overlay";
+  overlay.id = "companionEditorOverlay";
+  overlay.setAttribute("aria-label", "添加同行人");
+  overlay.innerHTML = `
+    <form class="companion-editor" id="companionEditorForm">
+      <div class="companion-editor-head">
+        <div>
+          <span class="overline">同行人</span>
+          <h3>添加同行人</h3>
+        </div>
+        <button class="icon-button" id="companionEditorClose" type="button" aria-label="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <label>
+        <span>姓名</span>
+        <input id="companionNameInput" type="text" maxlength="30" placeholder="例如：王小明" autocomplete="name" />
+      </label>
+      <label>
+        <span>类型/关系</span>
+        <select id="companionTypeInput">
+          <option value="成人">成人</option>
+          <option value="儿童">儿童</option>
+          <option value="老人">老人</option>
+          <option value="朋友">朋友</option>
+          <option value="家人">家人</option>
+        </select>
+      </label>
+      <label>
+        <span>证件信息</span>
+        <input id="companionIdInput" type="text" maxlength="80" autocomplete="off" placeholder="请输入身份证、护照或其他有效证件号" />
+      </label>
+      <label>
+        <span>备注</span>
+        <input id="companionNoteInput" type="text" maxlength="80" placeholder="可填写年龄、证件后四位或特殊需求" />
+      </label>
+      <p class="auth-message" id="companionEditorMessage" role="status" aria-live="polite"></p>
+      <button class="primary-button" type="submit">保存同行人</button>
+    </form>
+  `;
+  document.body.appendChild(overlay);
+  refreshIcons();
+
+  const close = () => closeCompanionEditor();
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) close();
+  });
+  overlay.querySelector("#companionEditorClose").addEventListener("click", close);
+  overlay.querySelector("#companionNameInput").focus();
+  overlay.querySelector("#companionEditorForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const nameInput = overlay.querySelector("#companionNameInput");
+    const idInput = overlay.querySelector("#companionIdInput");
+    const name = nameInput.value.trim();
+    const type = overlay.querySelector("#companionTypeInput").value;
+    const idInfo = idInput.value.trim();
+    const note = overlay.querySelector("#companionNoteInput").value.trim();
+    const message = overlay.querySelector("#companionEditorMessage");
+    if (!name) {
+      message.textContent = "请填写同行人姓名。";
+      message.classList.add("error");
+      nameInput.focus();
+      return;
+    }
+    if (!idInfo) {
+      message.textContent = "请填写同行人证件信息。";
+      message.classList.add("error");
+      idInput.focus();
+      return;
+    }
+
+    state.orderCompanions.push({ name, type, idInfo, note });
+    closeCompanionEditor();
+    renderOrderCompanionList();
+  });
+}
+
+function closeCompanionEditor() {
+  document.querySelector("#companionEditorOverlay")?.remove();
+}
+
+function getOrderCompanionInfo() {
+  return state.orderCompanions
+    .map((person, index) => {
+      const detail = [person.name, person.type, `证件：${person.idInfo}`, person.note].filter(Boolean).join("，");
+      return `${index + 1}. ${detail}`;
+    })
+    .join("；");
+}
+
+async function createRouteOrder(event, product, travelDate) {
+  event.preventDefault();
+  const addressInput = document.querySelector("#routeOrderAddressInput");
+  const travelerNameInput = document.querySelector("#orderTravelerNameInput");
+  const travelerIdInput = document.querySelector("#orderTravelerIdInput");
+  const contactPhoneInput = document.querySelector("#orderContactPhoneInput");
+  const dietInput = document.querySelector("#orderDietInput");
+  const remarkInput = document.querySelector("#orderRemarkInput");
+  const message = document.querySelector("#routeOrderMessage");
+  const button = event.submitter;
+  const lodgingAddress = addressInput.value.trim();
+  const travelerName = travelerNameInput.value.trim();
+  const travelerIdInfo = travelerIdInput.value.trim();
+  const travelerPhone = contactPhoneInput.value.trim();
+  const companionInfo = getOrderCompanionInfo();
+  const dietaryNotes = dietInput.value.trim();
+  const orderRemark = remarkInput.value.trim();
+  const paymentMethod = button?.dataset.paymentMethod || "线上支付";
+
+  if (!travelerName) {
+    showRouteOrderMessage("请填写主要出行人姓名。", "error");
+    travelerNameInput.focus();
+    return;
+  }
+  if (!travelerIdInfo) {
+    showRouteOrderMessage("请填写主要出行人证件信息。", "error");
+    travelerIdInput.focus();
+    return;
+  }
+  if (!travelerPhone) {
+    showRouteOrderMessage("请填写有效联系方式。", "error");
+    contactPhoneInput.focus();
+    return;
+  }
+  if (!lodgingAddress) {
+    showRouteOrderMessage("请填写接送地址。", "error");
+    addressInput.focus();
+    return;
+  }
+
   button.disabled = true;
-  button.textContent = "下单中...";
+  button.textContent = "支付中...";
   message.textContent = "";
   message.classList.remove("error", "success");
 
@@ -1266,28 +2192,48 @@ async function createRouteOrder(event, product) {
       {
         productId: product.id,
         travelDate,
-        travelerName: state.user?.nickname || state.user?.name || "游客",
-        travelerPhone: state.user?.phone || "",
+        lodgingAddress,
+        travelerName,
+        travelerIdInfo,
+        travelerPhone,
+        companions: state.orderCompanions,
+        companionInfo,
+        dietaryNotes,
+        orderRemark,
+        paymentMethod,
       },
       token ? { Authorization: `Bearer ${token}` } : {},
     );
     const order = normalizeRouteOrder(result.order);
     upsertRouteOrder(order);
-    state.productOrderStatus = "下单成功，订单已进入行程页，等待平台确认。";
+    state.orderDraft = null;
+    state.orderCompanions = [];
+    state.productOrderStatus = "支付成功，正式订单已同步给平台和导游。";
     showRouteOrderMessage(state.productOrderStatus, "success");
   } catch (error) {
-    const order = createLocalRouteOrder(product, travelDate);
+    const order = createLocalRouteOrder(product, travelDate, lodgingAddress, {
+      travelerName,
+      travelerIdInfo,
+      travelerPhone,
+      companions: state.orderCompanions,
+      companionInfo,
+      dietaryNotes,
+      orderRemark,
+      paymentMethod,
+    });
     upsertRouteOrder(order);
     sendOrderPixel(order);
-    state.productOrderStatus = "下单成功，订单已进入行程页，等待平台确认。";
+    state.orderDraft = null;
+    state.orderCompanions = [];
+    state.productOrderStatus = "支付成功，正式订单已同步给平台和导游。";
     showRouteOrderMessage(state.productOrderStatus, "success");
   } finally {
     button.disabled = false;
-    button.textContent = "立即下单";
+    button.textContent = paymentMethod === "微信支付" ? "微信支付" : "支付宝支付";
   }
 }
 
-function createLocalRouteOrder(product, travelDate) {
+function createLocalRouteOrder(product, travelDate, lodgingAddress = "", details = {}) {
   return normalizeRouteOrder({
     id: `local-order-${Date.now()}`,
     productId: product.id,
@@ -1297,10 +2243,18 @@ function createLocalRouteOrder(product, travelDate) {
     preference: product.preference,
     duration: product.duration,
     travelDate,
+    lodgingAddress,
     price: product.price,
-    travelerName: state.user?.nickname || state.user?.name || "游客",
-    travelerPhone: state.user?.phone || "",
-    status: "待确认",
+    travelerName: details.travelerName || state.user?.nickname || state.user?.name || "游客",
+    travelerIdInfo: details.travelerIdInfo || "",
+    travelerPhone: details.travelerPhone || state.user?.phone || "",
+    companions: Array.isArray(details.companions) ? details.companions : [],
+    companionInfo: details.companionInfo || "",
+    dietaryNotes: details.dietaryNotes || "",
+    orderRemark: details.orderRemark || "",
+    paymentMethod: details.paymentMethod || "线上支付",
+    paymentStatus: "已支付",
+    status: "已支付",
     createdAt: new Date().toISOString(),
   });
 }
@@ -1320,9 +2274,17 @@ function normalizeRouteOrder(order = {}) {
     preference: order.preference || "",
     duration: order.duration || "",
     travelDate: order.travelDate || "",
+    lodgingAddress: order.lodgingAddress || "",
     price: Number(order.price) || 0,
     travelerName: order.travelerName || "游客",
+    travelerIdInfo: order.travelerIdInfo || "",
     travelerPhone: order.travelerPhone || "",
+    companions: Array.isArray(order.companions) ? order.companions : [],
+    companionInfo: order.companionInfo || "",
+    dietaryNotes: order.dietaryNotes || "",
+    orderRemark: order.orderRemark || "",
+    paymentMethod: order.paymentMethod || "",
+    paymentStatus: order.paymentStatus || "",
     guideName: order.guideName || "",
     guidePhone: order.guidePhone || "",
     claimedAt: order.claimedAt || "",
@@ -1336,6 +2298,42 @@ function getChatIdentity() {
     name: String(state.user?.nickname || state.user?.name || state.guideApplication?.realName || "").trim(),
     phone: String(state.user?.phone || state.guideApplication?.phone || "").trim(),
   };
+}
+
+function getChatUserKey(user = state.user) {
+  const phone = String(user?.phone || "").replace(/[^\d]/g, "");
+  if (phone) return `phone:${phone}`;
+  const name = String(user?.nickname || user?.name || "").trim();
+  if (name) return `name:${name}`;
+  return "guest";
+}
+
+function getChatReadAt(orderId) {
+  const userKey = getChatUserKey();
+  return state.chatReadState?.[userKey]?.[orderId] || "";
+}
+
+function saveChatReadState() {
+  localStorage.setItem("staynestChatReadState", JSON.stringify(state.chatReadState || {}));
+}
+
+function markOrderChatRead(orderId, thread = state.chatThreads[orderId] || []) {
+  if (!orderId) return;
+  const userKey = getChatUserKey();
+  const latestMessageAt = thread
+    .map((item) => item.createdAt || "")
+    .filter(Boolean)
+    .sort()
+    .pop();
+  state.chatReadState = {
+    ...(state.chatReadState || {}),
+    [userKey]: {
+      ...(state.chatReadState?.[userKey] || {}),
+      [orderId]: latestMessageAt || new Date().toISOString(),
+    },
+  };
+  saveChatReadState();
+  updateMessageUnreadBadge();
 }
 
 function isOwnChatMessage(message) {
@@ -1358,6 +2356,70 @@ function normalizeChatMessage(message = {}) {
     createdAt: message.createdAt || "",
     isMine: isOwnChatMessage(message),
   };
+}
+
+function isUnreadChatMessage(message, readAt) {
+  const item = normalizeChatMessage(message);
+  if (item.isMine) return false;
+  if (!readAt) return true;
+  if (!item.createdAt) return true;
+  return item.createdAt > readAt;
+}
+
+function getOrderUnreadCount(orderId) {
+  const thread = (state.chatThreads[orderId] || []).map(normalizeChatMessage);
+  const readAt = getChatReadAt(orderId);
+  return thread.filter((message) => isUnreadChatMessage(message, readAt)).length;
+}
+
+function isMessageOrder(order) {
+  return order.status !== "待确认" && Boolean(order.guideName || order.guidePhone);
+}
+
+function getMessageOrders() {
+  return state.orders.map(normalizeRouteOrder).filter(isMessageOrder);
+}
+
+function getTotalUnreadCount() {
+  return getMessageOrders().reduce((total, order) => total + getOrderUnreadCount(order.id), 0);
+}
+
+function updateMessageUnreadBadge() {
+  const button = document.querySelector('.tab-button[data-tab="messages"]');
+  if (!button) return;
+  const total = getTotalUnreadCount();
+  let badge = button.querySelector(".tab-unread");
+  if (!total) {
+    badge?.remove();
+    button.setAttribute("aria-label", "消息");
+    return;
+  }
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.className = "tab-unread";
+    button.appendChild(badge);
+  }
+  badge.textContent = total > 99 ? "99+" : String(total);
+  button.setAttribute("aria-label", `消息，${total}条未读`);
+}
+
+async function refreshMessageThreadsForOrders(ordersToRefresh = getMessageOrders()) {
+  if (state.messageThreadsRefreshing) return;
+  state.messageThreadsRefreshing = true;
+  try {
+    await Promise.all(
+      ordersToRefresh.map(async (order) => {
+        try {
+          await loadOrderChat(order.id);
+        } catch {
+          // Keep cached chat data when the backend is temporarily unavailable.
+        }
+      }),
+    );
+  } finally {
+    state.messageThreadsRefreshing = false;
+    updateMessageUnreadBadge();
+  }
 }
 
 async function loadOrderChat(orderId) {
@@ -1404,6 +2466,7 @@ function upsertRouteOrder(order) {
     state.orders.unshift(order);
   }
   localStorage.setItem("staynestOrders", JSON.stringify(state.orders));
+  updateMessageUnreadBadge();
 }
 
 function showRouteOrderMessage(text, type) {
@@ -1507,6 +2570,12 @@ function renderTrips() {
 
 function renderTripsContent() {
   const routeOrders = state.orders.map(normalizeRouteOrder);
+  const activeOrder = routeOrders.find((order) => order.id === state.activeTripOrderId);
+  if (activeOrder) {
+    renderTripDetail(activeOrder);
+    return;
+  }
+
   const dynamicTrips = routeOrders
     .filter((order) => (isApprovedGuide() ? order.guideName || order.guidePhone : true))
     .map((order) => {
@@ -1514,7 +2583,7 @@ function renderTripsContent() {
         ? `${escapeHtml(order.travelerName || "游客")} · ${escapeHtml(order.travelerPhone || "手机号未留")} · ${escapeHtml(order.destination)}`
         : `¥${formatter.format(order.price)} / 人 · ${escapeHtml(order.destination)} · ${escapeHtml(order.duration)}${order.guideName ? ` · 导游 ${escapeHtml(order.guideName)}` : ""}`;
       return `
-        <article class="trip-card">
+        <button class="trip-card" type="button" data-trip-order-id="${escapeHtml(order.id)}" aria-label="查看 ${escapeHtml(order.productTitle)} 的行程详情">
           ${order.productImage ? `<img src="${order.productImage}" alt="${escapeHtml(order.productTitle)}" />` : ""}
           <div>
             <span class="pill">${escapeHtml(order.status)}</span>
@@ -1522,7 +2591,7 @@ function renderTripsContent() {
             <p>${escapeHtml(order.travelDate)} 出行</p>
             <p>${detail}</p>
           </div>
-        </article>
+        </button>
       `;
     });
 
@@ -1536,24 +2605,136 @@ function renderTripsContent() {
     </section>
     <div class="trip-list">
       ${dynamicTrips.length ? dynamicTrips.join("") : ""}
-      ${!dynamicTrips.length && !isApprovedGuide() ? trips
-        .map(
-          (trip) => `
-            <article class="trip-card">
-              <img src="${trip.image}" alt="${trip.title}" />
-              <div>
-                <span class="pill">${trip.status}</span>
-                <h3>${trip.title}</h3>
-                <p>${trip.date}</p>
-                <p>${trip.detail}</p>
-              </div>
-            </article>
-          `,
-        )
-        .join("") : ""}
+      ${!dynamicTrips.length && !isApprovedGuide() ? `<section class="empty-state explore-empty"><strong>暂无行程</strong><span>游客下单成功后会显示在这里。</span></section>` : ""}
       ${!dynamicTrips.length && isApprovedGuide() ? `<section class="empty-state explore-empty"><strong>暂无已接行程</strong><span>抢单成功后会显示在这里。</span></section>` : ""}
     </div>
   `;
+
+  document.querySelector(".trip-list").addEventListener("click", (event) => {
+    const card = event.target.closest("[data-trip-order-id]");
+    if (!card) return;
+    state.activeTripOrderId = card.dataset.tripOrderId;
+    renderTripsContent();
+    refreshIcons();
+    appContent.scrollTo({ top: 0, behavior: "smooth" });
+  });
+}
+
+function renderTripDetail(order) {
+  const product = getProductForOrder(order);
+  const meeting = getTripMeetingInfo(order, product);
+  const routePlaces = product?.spots?.length ? product.spots : [order.destination].filter(Boolean);
+  appContent.innerHTML = `
+    <section class="trip-detail">
+      <button class="ghost-button trip-detail-back" id="tripDetailBackButton" type="button">
+        <i data-lucide="chevron-left"></i>
+        返回行程
+      </button>
+
+      <article class="trip-detail-hero">
+        ${order.productImage ? `<img src="${escapeHtml(order.productImage)}" alt="${escapeHtml(order.productTitle)}" />` : ""}
+        <div>
+          <span class="pill">${escapeHtml(order.status)}</span>
+          <h3>${escapeHtml(order.productTitle)}</h3>
+          <p>${escapeHtml(order.travelDate || "未选日期")} 出行 · ${escapeHtml(order.destination || "目的地")}</p>
+        </div>
+      </article>
+
+      <section class="trip-detail-grid">
+        <div>
+          <span>集合时间</span>
+          <strong>${escapeHtml(meeting.time)}</strong>
+        </div>
+        <div>
+          <span>集合地点</span>
+          <strong>${escapeHtml(meeting.place)}</strong>
+        </div>
+        <div>
+          <span>接送地址</span>
+          <strong>${escapeHtml(order.lodgingAddress || "待与对方确认")}</strong>
+        </div>
+        <div>
+          <span>${isApprovedGuide() ? "旅客" : "导游"}</span>
+          <strong>${escapeHtml(isApprovedGuide() ? order.travelerName || "游客" : order.guideName || "待确认")}</strong>
+          <small>${escapeHtml(isApprovedGuide() ? order.travelerPhone || "手机号未留" : order.guidePhone || "手机号未留")}</small>
+        </div>
+        <div>
+          <span>目的地</span>
+          <strong>${escapeHtml(order.destination || "未填写")}</strong>
+        </div>
+        <div>
+          <span>支付状态</span>
+          <strong>${escapeHtml(order.paymentStatus || order.status || "已支付")}</strong>
+          <small>${escapeHtml(order.paymentMethod || "线上支付")}</small>
+        </div>
+      </section>
+
+      <section class="trip-detail-section">
+        <h4>出行人员与备注</h4>
+        <p><strong>主要出行人：</strong>${escapeHtml(order.travelerName || "游客")}${order.travelerIdInfo ? ` · 证件：${escapeHtml(order.travelerIdInfo)}` : ""}</p>
+        <p><strong>同行人：</strong>${escapeHtml(order.companionInfo || "未填写")}</p>
+        <p><strong>饮食及过敏源：</strong>${escapeHtml(order.dietaryNotes || "未填写")}</p>
+        <p><strong>其他备注：</strong>${escapeHtml(order.orderRemark || "无")}</p>
+      </section>
+
+      <section class="trip-detail-section">
+        <h4>旅行路线</h4>
+        <div class="trip-route-line">
+          ${routePlaces.length ? routePlaces.map((place) => `<span>${escapeHtml(place)}</span>`).join("") : `<p>${escapeHtml(order.productTitle)}</p>`}
+        </div>
+      </section>
+
+      ${
+        product?.itinerary?.length
+          ? `
+            <section class="trip-detail-section">
+              <h4>行程安排</h4>
+              <div class="trip-timeline">
+                ${product.itinerary
+                  .map(
+                    ([time, title, description]) => `
+                      <div>
+                        <time>${escapeHtml(time)}</time>
+                        <strong>${escapeHtml(title)}</strong>
+                        <p>${escapeHtml(description)}</p>
+                      </div>
+                    `,
+                  )
+                  .join("")}
+              </div>
+            </section>
+          `
+          : ""
+      }
+
+      ${
+        product
+          ? `
+            <section class="trip-detail-section">
+              <h4>路线介绍</h4>
+              <div class="trip-detail-body">${renderRouteBodyBlocks(product)}</div>
+            </section>
+          `
+          : ""
+      }
+    </section>
+  `;
+
+  document.querySelector("#tripDetailBackButton").addEventListener("click", () => {
+    state.activeTripOrderId = "";
+    renderTripsContent();
+    refreshIcons();
+  });
+}
+
+function getTripMeetingInfo(order, product) {
+  const firstItineraryTime = product?.itinerary?.[0]?.[0] || "";
+  const firstSpot = order.lodgingAddress || product?.spots?.[0] || order.destination || "待与对方确认";
+  const date = order.travelDate || "出行当天";
+  return {
+    time: firstItineraryTime ? `${date} ${firstItineraryTime}` : `${date} 09:00`,
+    place: firstSpot,
+  };
 }
 
 function renderMessages() {
@@ -1567,25 +2748,36 @@ function renderMessages() {
     if (state.tab === "messages") {
       renderMessagesContent();
       refreshIcons();
+      refreshMessageThreadsForOrders().then(() => {
+        if (state.tab === "messages" && !state.activeChatOrderId) {
+          renderMessagesContent();
+          refreshIcons();
+        }
+      });
     }
   });
   renderMessagesContent();
+  updateMessageUnreadBadge();
 }
 
 function renderMessagesContent() {
-  const orderMessages = state.orders
-    .map(normalizeRouteOrder)
-    .filter((order) => order.status !== "待确认" && (order.guideName || order.guidePhone))
-    .map((order) => {
+  const orderMessages = getMessageOrders().map((order) => {
+      const thread = (state.chatThreads[order.id] || []).map(normalizeChatMessage);
+      const lastMessage = thread[thread.length - 1];
+      const unread = getOrderUnreadCount(order.id);
+      const fallbackBody = isApprovedGuide()
+        ? `${order.travelDate} 出行，游客手机号：${order.travelerPhone || "未留"}。`
+        : `${order.guideName || "导游"} 已接单，导游手机号：${order.guidePhone || "待补充"}。`;
+      const body = lastMessage ? `${lastMessage.isMine ? "你：" : ""}${lastMessage.text}` : fallbackBody;
       if (isApprovedGuide()) {
         return {
           id: `guide-${order.id}`,
           orderId: order.id,
           name: order.travelerName || "游客",
           title: order.productTitle,
-          body: `${order.travelDate} 出行，游客手机号：${order.travelerPhone || "未留"}。`,
-          time: "刚刚",
-          unread: 0,
+          body,
+          time: lastMessage ? formatChatTime(lastMessage.createdAt) : "刚刚",
+          unread,
         };
       }
       return {
@@ -1593,12 +2785,13 @@ function renderMessagesContent() {
         orderId: order.id,
         name: order.guideName || "导游",
         title: `${order.productTitle} 已接单`,
-        body: `${order.guideName || "导游"} 已接单，导游手机号：${order.guidePhone || "待补充"}。`,
-        time: "刚刚",
-        unread: 1,
+        body,
+        time: lastMessage ? formatChatTime(lastMessage.createdAt) : "刚刚",
+        unread,
       };
     });
   const visibleMessages = [...orderMessages, ...messages];
+  updateMessageUnreadBadge();
 
   appContent.innerHTML = `
     <div class="message-list">
@@ -1654,6 +2847,7 @@ async function renderOrderChat() {
   } catch {
     // Keep the local cached thread visible if the backend is temporarily unavailable.
   }
+  markOrderChatRead(order.id, thread);
   appContent.innerHTML = `
     <section class="chat-panel">
       <header class="chat-head">
@@ -1722,23 +2916,129 @@ async function renderOrderChat() {
 function renderChatThread(order, thread) {
   const chatThread = document.querySelector("#chatThread");
   if (!chatThread) return;
+  const normalizedThread = thread.map(normalizeChatMessage);
   chatThread.innerHTML = `
     <p class="chat-bubble system">${escapeHtml(order.travelDate)} 出行 · ${escapeHtml(order.destination)} · ${escapeHtml(order.status)}</p>
-    ${thread
+    ${normalizedThread
       .map(
-        (item) => `
+        (item, index) => {
+          const translation = state.chatTranslations[getChatTranslationKey(item)] || "";
+          return `
           <article class="chat-message-row ${item.isMine ? "me" : ""}">
             ${item.isMine ? "" : `<span class="chat-message-avatar">${escapeHtml((item.senderName || "对").slice(0, 1))}</span>`}
             <div class="chat-message-stack">
               <p class="chat-bubble">${escapeHtml(item.text)}</p>
-              <small>${escapeHtml(item.isMine ? "你" : item.senderName || "对方")} · ${formatChatTime(item.createdAt)}</small>
+              ${translation ? `<p class="chat-translation">${escapeHtml(translation)}</p>` : ""}
+              <span class="chat-message-meta">
+                <small>${escapeHtml(item.isMine ? "你" : item.senderName || "对方")} · ${formatChatTime(item.createdAt)}</small>
+                <button class="chat-translate-button" type="button" data-translate-index="${index}" aria-label="翻译成英文">EN</button>
+              </span>
             </div>
           </article>
-        `,
+        `;
+        },
       )
       .join("")}
   `;
+  chatThread.querySelectorAll("[data-translate-index]").forEach((button) => {
+    button.addEventListener("click", () => translateChatMessage(order, normalizedThread[Number(button.dataset.translateIndex)], button));
+  });
   chatThread.scrollTop = chatThread.scrollHeight;
+}
+
+function getChatTranslationKey(message) {
+  return [message.orderId || state.activeChatOrderId || "order", message.id || message.createdAt || message.text].join(":");
+}
+
+function saveChatTranslations() {
+  localStorage.setItem("staynestChatTranslations", JSON.stringify(state.chatTranslations || {}));
+}
+
+async function translateChatMessage(order, message, button) {
+  if (!message?.text) return;
+  const key = getChatTranslationKey(message);
+  if (state.chatTranslations[key]) {
+    renderChatThread(order, state.chatThreads[order.id] || []);
+    return;
+  }
+
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "...";
+  try {
+    const result = await postJson("/api/translate", {
+      text: message.text,
+      target: "en",
+    });
+    state.chatTranslations[key] = result.translation || result.translatedText || fallbackTranslateToEnglish(message.text);
+  } catch {
+    state.chatTranslations[key] = fallbackTranslateToEnglish(message.text);
+  } finally {
+    saveChatTranslations();
+    button.disabled = false;
+    button.textContent = originalText;
+    renderChatThread(order, state.chatThreads[order.id] || []);
+    refreshIcons();
+  }
+}
+
+function fallbackTranslateToEnglish(text) {
+  const source = String(text || "").trim();
+  if (!source) return "";
+  if (/^[\x00-\x7F\s.,!?'"():;/-]+$/.test(source)) return source;
+  const phraseMap = [
+    ["明天在哪里集合", "Where should we meet tomorrow"],
+    ["今天在哪里集合", "Where should we meet today"],
+    ["酒店地址是这里", "The hotel address is here"],
+    ["民宿地址是这里", "The homestay address is here"],
+    ["酒店地址", "hotel address"],
+    ["民宿地址", "homestay address"],
+    ["你好", "Hello"],
+    ["您好", "Hello"],
+    ["好的", "OK"],
+    ["可以", "Yes, that works"],
+    ["谢谢", "Thank you"],
+    ["不用谢", "You are welcome"],
+    ["我到了", "I have arrived"],
+    ["马上到", "I will arrive soon"],
+    ["稍等", "Please wait a moment"],
+    ["在哪里集合", "Where should we meet"],
+    ["集合地点", "meeting point"],
+    ["集合时间", "meeting time"],
+    ["酒店", "hotel"],
+    ["民宿", "homestay"],
+    ["地址", "address"],
+    ["接送", "pickup and drop-off"],
+    ["司机", "driver"],
+    ["导游", "guide"],
+    ["游客", "traveler"],
+    ["行程", "itinerary"],
+    ["路线", "route"],
+    ["今天", "today"],
+    ["明天", "tomorrow"],
+    ["早上", "morning"],
+    ["下午", "afternoon"],
+    ["晚上", "evening"],
+    ["不要辣", "no spicy food"],
+    ["过敏", "allergy"],
+    ["儿童", "child"],
+    ["老人", "elderly traveler"],
+    ["这里", "here"],
+    ["是", "is"],
+  ];
+  let translated = source;
+  phraseMap.sort((a, b) => b[0].length - a[0].length).forEach(([from, to]) => {
+    translated = translated.replaceAll(from, to);
+  });
+  translated = translated
+    .replaceAll("，", ", ")
+    .replaceAll("。", ".")
+    .replaceAll("？", "? ")
+    .replaceAll("！", "! ")
+    .replaceAll("、", ", ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return translated === source ? `English translation: ${source}` : translated;
 }
 
 function formatChatTime(value) {
@@ -1769,51 +3069,240 @@ async function refreshActiveChat(order) {
     const nextThread = await loadOrderChat(order.id);
     if (nextThread.length !== previousThread.length) {
       renderChatThread(order, nextThread);
+      markOrderChatRead(order.id, nextThread);
     }
   } catch {
     // Ignore transient polling failures; the next interval will retry.
   }
 }
 
+async function openProfileTrips() {
+  const button = document.querySelector("#profileTripsButton");
+  if (button) button.disabled = true;
+  try {
+    await loadRouteOrders();
+  } catch {
+    // Keep the locally cached orders usable if the backend is temporarily unavailable.
+  } finally {
+    if (button) button.disabled = false;
+  }
+
+  const visibleOrders = state.orders
+    .map(normalizeRouteOrder)
+    .filter((order) => (isApprovedGuide() ? Boolean(order.guideName || order.guidePhone) : true));
+  state.activeTripOrderId = visibleOrders[0]?.id || "";
+  setTab("trips");
+  appContent.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function getUserDisplayName(user = state.user) {
+  return user?.nickname || user?.name || "游客";
+}
+
+function renderUserAvatar(user = state.user, className = "large-avatar") {
+  const displayName = getUserDisplayName(user);
+  const avatar = user?.avatar || "teal";
+  const avatarImage = user?.avatarImage || "";
+  if (avatarImage) {
+    return `<span class="${className} avatar-image"><img src="${escapeHtml(avatarImage)}" alt="${escapeHtml(displayName)}的头像" /></span>`;
+  }
+  return `<span class="${className} avatar-${escapeHtml(avatar)}">${escapeHtml(displayName.slice(0, 1).toUpperCase())}</span>`;
+}
+
+function updateHeaderAvatar() {
+  if (!avatarInitial) return;
+  const displayName = getUserDisplayName();
+  const avatarImage = state.user?.avatarImage || "";
+  if (avatarImage) {
+    avatarInitial.innerHTML = `<img src="${escapeHtml(avatarImage)}" alt="${escapeHtml(displayName)}的头像" />`;
+    avatarInitial.classList.add("has-image");
+    return;
+  }
+  avatarInitial.classList.remove("has-image");
+  avatarInitial.textContent = displayName.slice(0, 1).toUpperCase();
+}
+
+async function saveProfileEdit(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submitButton = form.querySelector("button[type='submit']");
+  const message = document.querySelector("#profileEditMessage");
+  const name = document.querySelector("#profileNameInput").value.trim();
+  const gender = document.querySelector("#profileGenderInput").value;
+  const nationality = document.querySelector("#profileNationalityInput").value.trim();
+  const bio = document.querySelector("#profileBioInput").value.trim();
+  const avatarImage = state.profileAvatarDraft || state.user?.avatarImage || "";
+
+  if (!name) {
+    message.textContent = "请填写名字。";
+    message.classList.add("error");
+    message.classList.remove("success");
+    document.querySelector("#profileNameInput").focus();
+    return;
+  }
+
+  submitButton.disabled = true;
+  submitButton.textContent = "正在保存...";
+  message.textContent = "正在保存个人资料...";
+  message.classList.add("success");
+  message.classList.remove("error");
+
+  const payload = {
+    name,
+    gender,
+    nationality,
+    bio,
+    avatar: state.user?.avatar || "teal",
+    avatarImage,
+    phone: state.user?.phone || "",
+    email: state.user?.email || "",
+    appleSub: state.user?.appleSub || "",
+  };
+
+  try {
+    const token = localStorage.getItem("staynestToken") || "";
+    if (token) {
+      const result = await postJson("/api/profile", payload, { Authorization: `Bearer ${token}` });
+      state.user = result.user;
+    } else {
+      state.user = { ...(state.user || {}), ...payload, nickname: name };
+    }
+    localStorage.setItem("staynestUser", JSON.stringify(state.user));
+    state.profileEditOpen = false;
+    state.profileAvatarDraft = "";
+    updateHeaderAvatar();
+    renderProfile();
+    refreshIcons();
+  } catch (error) {
+    message.textContent = error.message || "资料保存失败，请稍后重试。";
+    message.classList.add("error");
+    message.classList.remove("success");
+  } finally {
+    submitButton.disabled = false;
+    submitButton.textContent = "保存资料";
+  }
+}
+
+async function handleProfileAvatarChange(event) {
+  const file = event.target.files?.[0];
+  const message = document.querySelector("#profileEditMessage");
+  if (!file) return;
+  try {
+    message.textContent = "正在压缩头像...";
+    message.classList.add("success");
+    message.classList.remove("error");
+    const attachment = await imageFileToAttachment(file, "头像");
+    state.profileAvatarDraft = attachment.dataUrl;
+    const preview = document.querySelector("#profileAvatarPreview");
+    if (preview) {
+      preview.innerHTML = `<img src="${escapeHtml(attachment.dataUrl)}" alt="头像预览" />`;
+      preview.classList.add("avatar-image");
+    }
+    message.textContent = "头像已选择，保存资料后生效。";
+  } catch (error) {
+    message.textContent = error.message || "头像处理失败，请换一张图片。";
+    message.classList.add("error");
+    message.classList.remove("success");
+  }
+}
+
 function renderProfile() {
   const savedListings = listings.filter((listing) => state.saved.has(listing.id));
-  const displayName = state.user?.nickname || state.user?.name || "游客";
-  const avatar = state.user?.avatar || "teal";
+  const displayName = getUserDisplayName();
   const guideApplication = state.guideApplication;
+  const profilePhone = state.user?.phone || guideApplication?.phone || "";
+  const profileAvatarPreview = state.profileAvatarDraft
+    ? `<span class="large-avatar avatar-image" id="profileAvatarPreview"><img src="${escapeHtml(state.profileAvatarDraft)}" alt="头像预览" /></span>`
+    : renderUserAvatar(state.user, "large-avatar");
   refreshGuideApplicationFromServer();
   syncGuideApplicationToServer();
-  const guideReviewStatus = guideApplication?.reviewStatus || guideApplication?.status || "";
-  const guideTitle = guideApplication
+  const guideReviewStatus = getGuideReviewStatus(guideApplication, state.user);
+  const hasGuideApplication = Boolean(guideApplication) || hasGuideApplicationStatus(guideReviewStatus);
+  const guideCompletedOrders = getGuideCompletedOrderCount();
+  const guideLevelInfo = guideReviewStatus === "已通过" ? getGuideLevelInfo(guideCompletedOrders) : null;
+  const guideLevelBadge = renderGuideLevelBadge(guideLevelInfo);
+  const guideTitle = hasGuideApplication
     ? guideReviewStatus === "已通过"
-      ? "导游身份已通过"
+      ? guideLevelInfo.name
       : guideReviewStatus === "已驳回"
         ? "导游申请未通过"
-        : "导游申请已提交"
+        : "正在审核"
     : state.guideFormOpen
       ? "填写导游资料"
       : "注册成为导游";
-  const guideDescription = guideApplication
+  const guideDescription = hasGuideApplication
     ? guideReviewStatus === "已通过"
-      ? "你已经可以为旅行者提供本地路线、陪同和体验服务。"
+      ? `已完成 ${guideCompletedOrders} 个订单，${guideLevelInfo.remaining ? `还差 ${guideLevelInfo.remaining} 单升级为${guideLevelInfo.nextName}。` : "已达到最高等级。"}`
       : guideReviewStatus === "已驳回"
         ? "请根据平台反馈补充资料后再次提交。"
-        : "平台会审核你的资料，通过后可以发布本地体验。"
+        : "导游申请已提交，平台正在审核你的资料。"
     : state.guideFormOpen
       ? "提交后会进入审核，审核通过后可以发布本地体验。"
       : "成为导游后，可以为旅行者提供本地路线、陪同和体验服务。";
+  const guideStatusLabel = guideReviewStatus === "待审核" ? "审核中" : guideReviewStatus || "审核中";
   appContent.innerHTML = `
     <section class="profile-card">
-      <span class="large-avatar avatar-${avatar}">${displayName.slice(0, 1).toUpperCase()}</span>
+      ${renderUserAvatar(state.user, "large-avatar")}
       <div>
-        <h3>${escapeHtml(displayName)}</h3>
-        <p>${state.user?.method || "未登录"}${state.user?.phone ? ` · ${escapeHtml(state.user.phone)}` : ""}</p>
+        <h3>${escapeHtml(displayName)}${guideLevelBadge}</h3>
+        <p>${state.user?.method || "未登录"}${profilePhone ? ` · ${escapeHtml(profilePhone)}` : ""}</p>
+        ${state.user?.nationality ? `<p>国籍 · ${escapeHtml(state.user.nationality)}</p>` : ""}
         ${state.user?.gender ? `<p>${escapeHtml(state.user.gender)}</p>` : ""}
         ${state.user?.bio ? `<p>${escapeHtml(state.user.bio)}</p>` : ""}
       </div>
+      <button class="ghost-button profile-edit-button" id="profileEditButton" type="button">
+        <i data-lucide="pencil"></i>
+        编辑资料
+      </button>
     </section>
 
+    ${
+      state.profileEditOpen
+        ? `
+          <section class="profile-edit-card">
+            <form class="profile-edit-form" id="profileEditForm" novalidate>
+              <div class="profile-avatar-edit">
+                ${profileAvatarPreview}
+                <label class="ghost-button profile-avatar-upload">
+                  <i data-lucide="camera"></i>
+                  上传头像
+                  <input id="profileAvatarInput" type="file" accept="image/*" />
+                </label>
+              </div>
+              <label>
+                <span>名字</span>
+                <input id="profileNameInput" type="text" maxlength="24" value="${escapeHtml(displayName)}" placeholder="请输入名字" />
+              </label>
+              <label>
+                <span>性别</span>
+                <select id="profileGenderInput">
+                  <option value="">请选择</option>
+                  ${["女", "男", "其他", "不便透露"].map((gender) => `<option value="${gender}" ${state.user?.gender === gender ? "selected" : ""}>${gender}</option>`).join("")}
+                </select>
+              </label>
+              <label>
+                <span>国籍</span>
+                <input id="profileNationalityInput" type="text" maxlength="40" value="${escapeHtml(state.user?.nationality || "")}" placeholder="例如：中国、美国、日本" />
+              </label>
+              <label>
+                <span>个人信息介绍</span>
+                <textarea id="profileBioInput" maxlength="300" rows="4" placeholder="介绍你的旅行偏好、语言能力或希望被如何称呼">${escapeHtml(state.user?.bio || "")}</textarea>
+              </label>
+              <p class="auth-message" id="profileEditMessage" role="status" aria-live="polite"></p>
+              <div class="guide-form-actions">
+                <button class="ghost-button" id="profileEditCancelButton" type="button">取消</button>
+                <button class="primary-button" type="submit">保存资料</button>
+              </div>
+            </form>
+          </section>
+        `
+        : ""
+    }
+
     <section class="profile-grid">
-      <div><strong>${trips.length}</strong><span>行程</span></div>
+      <button class="profile-stat-button" id="profileTripsButton" type="button" aria-label="查看已下单或已接单的行程">
+        <strong>${state.orders.length}</strong><span>行程</span>
+      </button>
       <div><strong>${savedListings.length}</strong><span>收藏</span></div>
       <div><strong>4.9</strong><span>评分</span></div>
     </section>
@@ -1829,12 +3318,20 @@ function renderProfile() {
       </div>
 
       ${
-        guideApplication
+        hasGuideApplication
           ? `
             <div class="guide-status">
-              <span><i data-lucide="badge-check"></i>${escapeHtml(guideApplication.status)}</span>
-              <strong>${escapeHtml(guideApplication.realName || guideApplication.applicantName || "导游申请人")} · ${escapeHtml(guideApplication.englishLevel || "英文水平未填写")}</strong>
-              <p>${escapeHtml(guideApplication.intro)}</p>
+              ${guideReviewStatus === "已通过" || guideReviewStatus === "已驳回" ? `<span><i data-lucide="badge-check"></i>${escapeHtml(guideStatusLabel)}</span>` : ""}
+              <strong>${escapeHtml(guideApplication?.realName || guideApplication?.applicantName || displayName)}${guideLevelBadge}${guideApplication?.englishLevel ? ` · ${escapeHtml(guideApplication.englishLevel)}` : ""}</strong>
+              <p>${escapeHtml(guideApplication?.intro || "审核通过后，你的导游服务入口会自动开启。")}</p>
+              ${
+                guideLevelInfo
+                  ? `<div class="guide-level-progress">
+                      <span>已完成 ${guideCompletedOrders} 单</span>
+                      <strong>${guideLevelInfo.remaining ? `距离${escapeHtml(guideLevelInfo.nextName)}还差 ${guideLevelInfo.remaining} 单` : "已达到最高等级"}</strong>
+                    </div>`
+                  : ""
+              }
             </div>
           `
           : !state.guideFormOpen
@@ -1922,6 +3419,22 @@ function renderProfile() {
     </section>
   `;
 
+  document.querySelector("#profileTripsButton")?.addEventListener("click", openProfileTrips);
+  document.querySelector("#profileEditButton")?.addEventListener("click", () => {
+    state.profileEditOpen = true;
+    state.profileAvatarDraft = "";
+    renderProfile();
+    refreshIcons();
+  });
+  document.querySelector("#profileEditCancelButton")?.addEventListener("click", () => {
+    state.profileEditOpen = false;
+    state.profileAvatarDraft = "";
+    renderProfile();
+    refreshIcons();
+  });
+  document.querySelector("#profileAvatarInput")?.addEventListener("change", handleProfileAvatarChange);
+  document.querySelector("#profileEditForm")?.addEventListener("submit", saveProfileEdit);
+
   const guideOpenButton = document.querySelector("#guideOpenButton");
   if (guideOpenButton) {
     guideOpenButton.addEventListener("click", () => {
@@ -1947,6 +3460,7 @@ function renderProfile() {
       if (state.guideSubmitting) return;
       const realName = document.querySelector("#guideNameInput").value.trim();
       const gender = document.querySelector("#guideGenderInput").value;
+      const guidePhone = state.user?.phone || state.guideApplication?.phone || "";
       const city = document.querySelector("#guideCityInput").value.trim();
       const specialty = document.querySelector("#guideSpecialtyInput").value;
       const englishLevel = document.querySelector("#guideEnglishLevelInput").value;
@@ -1954,8 +3468,14 @@ function renderProfile() {
       const message = document.querySelector("#guideMessage");
       const submitButton = guideForm.querySelector("button[type='submit']");
 
-      if (!realName || !gender || !city || !englishLevel || !intro) {
-        message.textContent = "请填写姓名、性别、服务城市、英文水平和个人介绍。";
+      if (!realName || !gender || !guidePhone || !city || !englishLevel || !intro) {
+        message.textContent = "请填写姓名、性别、服务城市、英文水平和个人介绍；手机号需先完成登录绑定。";
+        message.classList.add("error");
+        message.classList.remove("success");
+        return;
+      }
+      if (!validatePhone(guidePhone)) {
+        message.textContent = "当前账号手机号无效，请退出后用手机号重新登录。";
         message.classList.add("error");
         message.classList.remove("success");
         return;
@@ -1993,7 +3513,7 @@ function renderProfile() {
             applicantName: realName,
             realName,
             gender,
-            phone: state.user?.phone || "",
+            phone: guidePhone,
             avatar: state.user?.avatar || "teal",
             city,
             specialty,
@@ -2008,6 +3528,12 @@ function renderProfile() {
           { Authorization: `Bearer ${token}` },
         );
         state.guideApplication = result.application;
+        state.user = {
+          ...state.user,
+          phone: result.application?.phone || guidePhone,
+          guideStatus: result.application?.reviewStatus || result.application?.status || "审核中",
+        };
+        localStorage.setItem("staynestUser", JSON.stringify(state.user));
         saveGuideApplicationForUser(state.guideApplication);
         upsertGuideApplication(state.guideApplication);
         state.guideFormOpen = false;
@@ -2024,7 +3550,7 @@ function renderProfile() {
       }
     });
   }
-  document.querySelector("#logoutButton").addEventListener("click", logout);
+  document.querySelector("#logoutButton").addEventListener("click", showLogoutConfirmDialog);
 }
 
 function readGuideFile(selector, label, required = false) {
@@ -2155,7 +3681,11 @@ function blobToDataUrl(blob, label) {
 function upsertGuideApplication(application) {
   const storedApplication = slimGuideApplicationForStorage(application);
   const applications = JSON.parse(localStorage.getItem("staynestGuideApplications") || "[]");
-  const index = applications.findIndex((item) => item.id === storedApplication.id);
+  const storedPhone = String(storedApplication.phone || "").replace(/[^\d]/g, "");
+  const index = applications.findIndex((item) => {
+    const itemPhone = String(item.phone || "").replace(/[^\d]/g, "");
+    return item.id === storedApplication.id || (storedPhone && itemPhone === storedPhone);
+  });
   if (index >= 0) {
     applications[index] = storedApplication;
   } else {
@@ -2206,6 +3736,10 @@ async function refreshGuideApplicationFromServer() {
     const previousStatus = application?.reviewStatus || application?.status || "";
     const nextStatus = matched.reviewStatus || matched.status || "";
     state.guideApplication = { ...matched, serverSynced: true };
+    if (matched.phone && state.user && state.user.phone !== matched.phone) {
+      state.user = { ...state.user, phone: matched.phone };
+      localStorage.setItem("staynestUser", JSON.stringify(state.user));
+    }
     saveGuideApplicationForUser(state.guideApplication);
     upsertGuideApplication(state.guideApplication);
 

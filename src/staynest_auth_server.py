@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote
+from urllib.parse import parse_qs, quote, unquote, urlencode
 from urllib.request import Request, urlopen
 from wsgiref.simple_server import make_server
 from wsgiref.util import setup_testing_defaults
@@ -26,6 +26,7 @@ DB_PATH = Path(os.environ.get("STAYNEST_DB_PATH", ROOT / "staynest.sqlite3"))
 CODE_TTL_SECONDS = 300
 RESEND_SECONDS = 60
 MAX_ATTEMPTS = 5
+SESSION_TTL_SECONDS = 90 * 24 * 60 * 60
 DEV_SMS = os.environ.get("STAYNEST_DEV_SMS", "1") != "0"
 SMS_PROVIDER = os.environ.get("STAYNEST_SMS_PROVIDER", "aliyun").lower()
 APPLE_CLIENT_ID = os.environ.get("APPLE_CLIENT_ID", "").strip()
@@ -40,6 +41,9 @@ APPLE_ALLOWED_CLIENT_IDS = [
 ]
 APPLE_REDIRECT_URI = os.environ.get("APPLE_REDIRECT_URI", "").strip()
 APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys"
+AMAP_WEB_KEY = os.environ.get("STAYNEST_AMAP_KEY", "").strip()
+TRANSLATE_API_URL = os.environ.get("STAYNEST_TRANSLATE_API_URL", "").strip()
+TRANSLATE_API_KEY = os.environ.get("STAYNEST_TRANSLATE_API_KEY", "").strip()
 
 
 @dataclass
@@ -293,6 +297,41 @@ def _save_users() -> None:
     _replace_collection("users", users.items())
 
 
+def _load_sessions() -> dict[str, dict[str, Any]]:
+    now = time.time()
+    loaded: dict[str, dict[str, Any]] = {}
+    changed = False
+    for token, value in _load_collection("sessions"):
+        try:
+            created_at = float(value.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created_at = 0
+        if created_at and now - created_at <= SESSION_TTL_SECONDS:
+            loaded[token] = value
+        else:
+            changed = True
+    if not _collection_initialized("sessions"):
+        _replace_collection("sessions", [])
+    elif changed:
+        _replace_collection("sessions", loaded.items())
+    return loaded
+
+
+def _save_sessions() -> None:
+    now = time.time()
+    active_sessions: dict[str, dict[str, Any]] = {}
+    for token, value in sessions.items():
+        try:
+            created_at = float(value.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created_at = 0
+        if created_at and now - created_at <= SESSION_TTL_SECONDS:
+            active_sessions[token] = value
+    sessions.clear()
+    sessions.update(active_sessions)
+    _replace_collection("sessions", sessions.items())
+
+
 def _load_guide_applications() -> list[dict[str, Any]]:
     rows = _load_collection("guide_applications")
     if rows:
@@ -383,6 +422,7 @@ def _ensure_order_chat_starters() -> None:
 
 _init_db()
 users.update(_load_users())
+sessions.update(_load_sessions())
 guide_applications.extend(_load_guide_applications())
 products.extend(_load_products())
 orders.extend(_load_orders())
@@ -410,16 +450,54 @@ def _error(start_response, status: str, message: str):
     return _json_response(start_response, status, {"ok": False, "error": message})
 
 
+def _guide_application_for_profile(profile: dict[str, Any]) -> dict[str, Any] | None:
+    phone = str(profile.get("phone") or "")
+    apple_sub = str(profile.get("appleSub") or "").strip()
+    email = str(profile.get("email") or "").strip().lower()
+    names = {
+        str(profile.get("nickname") or "").strip(),
+        str(profile.get("name") or "").strip(),
+    }
+    names.discard("")
+    for application in guide_applications:
+        application_apple_sub = str(application.get("appleSub") or "").strip()
+        application_email = str(application.get("email") or "").strip().lower()
+        application_names = {
+            str(application.get("realName") or "").strip(),
+            str(application.get("applicantName") or "").strip(),
+        }
+        application_names.discard("")
+        if _phone_matches(phone, application.get("phone")):
+            return application
+        if apple_sub and application_apple_sub and apple_sub == application_apple_sub:
+            return application
+        if email and application_email and email == application_email:
+            return application
+        if names and application_names and names.intersection(application_names):
+            return application
+    return None
+
+
 def _public_user(profile: dict[str, Any]) -> dict[str, Any]:
+    guide_application = _guide_application_for_profile(profile) if "_guide_application_for_profile" in globals() else None
+    guide_status = _guide_status_for_user(profile) if "_guide_status_for_user" in globals() else str(profile.get("guideStatus") or "未申请")
+    guide_completed_orders = _guide_completed_order_count_for_user(profile) if "_guide_completed_order_count_for_user" in globals() else 0
+    guide_level = _guide_level_for_completed_orders(guide_completed_orders) if guide_status == "已通过" and "_guide_level_for_completed_orders" in globals() else ""
     return {
         "name": str(profile.get("name") or profile.get("nickname") or "StayNest 用户"),
         "nickname": str(profile.get("nickname") or profile.get("name") or "StayNest 用户"),
         "gender": str(profile.get("gender") or ""),
+        "nationality": str(profile.get("nationality") or ""),
         "bio": str(profile.get("bio") or ""),
+        "avatar": str(profile.get("avatar") or "teal"),
+        "avatarImage": str(profile.get("avatarImage") or ""),
         "method": str(profile.get("method") or "手机号"),
-        "phone": str(profile.get("phone") or ""),
+        "phone": str(profile.get("phone") or (guide_application or {}).get("phone") or ""),
         "email": str(profile.get("email") or ""),
         "appleSub": str(profile.get("appleSub") or ""),
+        "guideStatus": guide_status,
+        "guideCompletedOrders": guide_completed_orders,
+        "guideLevel": guide_level,
         "created_at": profile.get("created_at") or "",
     }
 
@@ -432,9 +510,122 @@ def _is_registered_user_complete(profile: dict[str, Any]) -> bool:
     )
 
 
+def _find_guide_application_by_phone(phone: str) -> dict[str, Any] | None:
+    if not _phone_digits(phone):
+        return None
+    return next(
+        (
+            application
+            for application in guide_applications
+            if _phone_matches(application.get("phone"), phone)
+        ),
+        None,
+    )
+
+
+def _find_user_key_by_phone(phone: str) -> str:
+    if not _phone_digits(phone):
+        return ""
+    if phone in users:
+        return phone
+    return next(
+        (
+            key
+            for key, profile in users.items()
+            if isinstance(profile, dict)
+            and _phone_matches(profile.get("phone"), phone)
+        ),
+        "",
+    )
+
+
+def _find_user_key_for_guide_application(application: dict[str, Any]) -> str:
+    apple_sub = str(application.get("appleSub") or "").strip()
+    email = str(application.get("email") or "").strip().lower()
+    phone = str(application.get("phone") or "").strip()
+    phone_key = _find_user_key_by_phone(phone)
+    if phone_key:
+        return phone_key
+    if apple_sub:
+        matched = next(
+            (
+                key
+                for key, profile in users.items()
+                if isinstance(profile, dict) and str(profile.get("appleSub") or "").strip() == apple_sub
+            ),
+            "",
+        )
+        if matched:
+            return matched
+    if email:
+        matched = next(
+            (
+                key
+                for key, profile in users.items()
+                if isinstance(profile, dict) and str(profile.get("email") or "").strip().lower() == email
+            ),
+            "",
+        )
+        if matched:
+            return matched
+    application_name = str(application.get("realName") or application.get("applicantName") or "").strip()
+    if not application_name:
+        return ""
+    matches = [
+        key
+        for key, profile in users.items()
+        if isinstance(profile, dict)
+        and application_name
+        in {
+            str(profile.get("name") or "").strip(),
+            str(profile.get("nickname") or "").strip(),
+        }
+    ]
+    return matches[0] if len(matches) == 1 else ""
+
+
+def _resolve_phone_login_user_key(phone: str) -> str:
+    user_key = _find_user_key_by_phone(phone)
+    if user_key:
+        return user_key
+
+    application = _find_guide_application_by_phone(phone)
+    if not application:
+        return ""
+
+    user_key = _find_user_key_for_guide_application(application)
+    profile = users.get(user_key, {}) if user_key else {}
+    if user_key and isinstance(profile, dict):
+        next_profile = {
+            **profile,
+            "phone": str(profile.get("phone") or phone),
+            "name": str(profile.get("name") or application.get("realName") or application.get("applicantName") or "StayNest 用户"),
+            "nickname": str(profile.get("nickname") or application.get("realName") or application.get("applicantName") or "StayNest 用户"),
+            "gender": str(profile.get("gender") or application.get("gender") or ""),
+            "method": str(profile.get("method") or "手机号"),
+            "created_at": profile.get("created_at") or int(time.time()),
+        }
+        return _save_canonical_user(phone, next_profile, user_key)
+
+    user_key = phone
+    profile = {
+        "name": str(application.get("realName") or application.get("applicantName") or "StayNest 用户"),
+        "nickname": str(application.get("realName") or application.get("applicantName") or "StayNest 用户"),
+        "gender": str(application.get("gender") or ""),
+        "bio": str(application.get("intro") or "导游用户"),
+        "method": "手机号",
+        "phone": phone,
+        "email": str(application.get("email") or ""),
+        "appleSub": str(application.get("appleSub") or ""),
+        "created_at": int(time.time()),
+    }
+    return _save_canonical_user(phone, profile)
+
+
 def _create_session(user: dict[str, Any], extra: dict[str, Any] | None = None) -> str:
     token = secrets.token_urlsafe(32)
     sessions[token] = {"user": user, "created_at": time.time(), **(extra or {})}
+    _save_sessions()
     return token
 
 
@@ -468,6 +659,59 @@ def _normalize_phone(value: Any) -> str:
 def _valid_phone(phone: str) -> bool:
     digits = "".join(ch for ch in phone if ch.isdigit())
     return 8 <= len(digits) <= 15
+
+
+def _phone_digits(value: Any) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _phone_matches(left: Any, right: Any) -> bool:
+    left_digits = _phone_digits(left)
+    right_digits = _phone_digits(right)
+    if not left_digits or not right_digits:
+        return False
+    if left_digits == right_digits:
+        return True
+    if left_digits.startswith("86") and len(left_digits) == 13 and left_digits[2:] == right_digits:
+        return True
+    if right_digits.startswith("86") and len(right_digits) == 13 and right_digits[2:] == left_digits:
+        return True
+    return False
+
+
+def _find_user_key_by_apple(apple_sub: Any = "", email: Any = "") -> str:
+    apple_sub = str(apple_sub or "").strip()
+    email = str(email or "").strip().lower()
+    return next(
+        (
+            key
+            for key, profile in users.items()
+            if isinstance(profile, dict)
+            and (
+                (apple_sub and str(profile.get("appleSub") or "").strip() == apple_sub)
+                or (email and str(profile.get("email") or "").strip().lower() == email)
+            )
+        ),
+        "",
+    )
+
+
+def _canonical_user_key_for_phone(phone: str) -> str:
+    return _normalize_phone(phone)
+
+
+def _save_canonical_user(phone: str, profile: dict[str, Any], old_key: str = "") -> str:
+    user_key = _canonical_user_key_for_phone(phone)
+    merged_profile = {
+        **(users.get(user_key, {}) if isinstance(users.get(user_key), dict) else {}),
+        **profile,
+        "phone": user_key,
+    }
+    users[user_key] = merged_profile
+    if old_key and old_key != user_key:
+        users.pop(old_key, None)
+    _save_users()
+    return user_key
 
 
 def _generate_code() -> str:
@@ -628,7 +872,56 @@ def _handle_verify_code(environ, start_response):
         return _error(start_response, "400 Bad Request", "验证码不正确。")
 
     codes.pop(phone, None)
-    if phone not in users:
+    apple_phone_token = str(data.get("applePhoneToken") or "").strip()
+    apple_session = sessions.get(apple_phone_token) if apple_phone_token else None
+    if apple_phone_token and apple_session and apple_session.get("pending_apple_phone"):
+        old_key = str(apple_session.get("user_key") or "").strip()
+        existing_phone_key = _find_user_key_by_phone(phone)
+        stored_user = users.get(existing_phone_key or old_key, {}) if (existing_phone_key or old_key) else {}
+        if not isinstance(stored_user, dict):
+            stored_user = {}
+        profile = {
+            **stored_user,
+            "name": str(stored_user.get("name") or apple_session.get("name") or "Apple 用户"),
+            "nickname": str(stored_user.get("nickname") or apple_session.get("name") or "Apple 用户"),
+            "gender": str(stored_user.get("gender") or ""),
+            "bio": str(stored_user.get("bio") or ""),
+            "method": "Apple ID",
+            "phone": phone,
+            "email": str(apple_session.get("email") or stored_user.get("email") or ""),
+            "appleSub": str(apple_session.get("appleSub") or stored_user.get("appleSub") or ""),
+            "created_at": stored_user.get("created_at") or int(time.time()),
+        }
+        user_key = _save_canonical_user(phone, profile, old_key if old_key and old_key != existing_phone_key else "")
+        user = _public_user(users[user_key])
+        if _is_registered_user_complete(users[user_key]):
+            token = _create_session(user)
+            sessions.pop(apple_phone_token, None)
+            _save_sessions()
+            return _json_response(start_response, "200 OK", {"ok": True, "token": token, "user": user})
+        apple_session.update(
+            {
+                "pending_registration": True,
+                "pending_apple_phone": False,
+                "phone": phone,
+                "user_key": user_key,
+            }
+        )
+        _save_sessions()
+        return _json_response(
+            start_response,
+            "200 OK",
+            {
+                "ok": True,
+                "requiresRegistration": True,
+                "registrationToken": apple_phone_token,
+                "phone": phone,
+                "name": str(user.get("name") or ""),
+            },
+        )
+
+    user_key = _resolve_phone_login_user_key(phone)
+    if not user_key:
         registration_token = _create_session(
             {"name": "", "method": "手机号", "phone": phone},
             {"pending_registration": True, "phone": phone},
@@ -644,7 +937,7 @@ def _handle_verify_code(environ, start_response):
             },
         )
 
-    user = _public_user(users[phone])
+    user = _public_user(users[user_key])
     token = _create_session(user)
     return _json_response(start_response, "200 OK", {"ok": True, "token": token, "user": user})
 
@@ -674,8 +967,9 @@ def _handle_register(environ, start_response):
 
     user_key = str(session.get("user_key") or phone).strip()
     if registration_method == "Apple ID":
-        user_key = user_key or f"apple:{session.get('appleSub') or session.get('email') or secrets.token_urlsafe(8)}"
         stored_user = users.get(user_key, {})
+        if not _valid_phone(phone):
+            return _error(start_response, "400 Bad Request", "请先验证手机号。")
         profile = {
             **stored_user,
             "name": name,
@@ -702,10 +996,10 @@ def _handle_register(environ, start_response):
             "phone": phone,
             "created_at": int(time.time()),
         }
-    users[user_key] = profile
-    _save_users()
+    user_key = _save_canonical_user(phone, profile, user_key if registration_method == "Apple ID" else "")
     user = _public_user(profile)
     sessions[token] = {"user": user, "created_at": time.time()}
+    _save_sessions()
     return _json_response(start_response, "200 OK", {"ok": True, "token": token, "user": user})
 
 
@@ -715,7 +1009,106 @@ def _handle_session(environ, start_response):
     session = sessions.get(token)
     if not token or not session:
         return _error(start_response, "401 Unauthorized", "登录已失效。")
+    user = session.get("user") if isinstance(session.get("user"), dict) else {}
+    guide_status = _guide_status_for_user(user)
+    guide_completed_orders = _guide_completed_order_count_for_user(user)
+    session["user"] = {
+        **user,
+        "guideStatus": guide_status,
+        "guideCompletedOrders": guide_completed_orders,
+        "guideLevel": _guide_level_for_completed_orders(guide_completed_orders) if guide_status == "已通过" else "",
+    }
+    _save_sessions()
     return _json_response(start_response, "200 OK", {"ok": True, "user": session["user"]})
+
+
+def _handle_update_profile(environ, start_response):
+    data, error = _read_json(environ)
+    if error:
+        return _error(start_response, "400 Bad Request", error)
+
+    auth = environ.get("HTTP_AUTHORIZATION", "")
+    token = auth.removeprefix("Bearer ").strip()
+    session = sessions.get(token)
+    if (not token or not session or not isinstance(session.get("user"), dict)) and token:
+        fallback_key = (
+            _find_user_key_by_phone(data.get("phone"))
+            or _find_user_key_by_apple(data.get("appleSub"), data.get("email"))
+        )
+        if fallback_key and isinstance(users.get(fallback_key), dict):
+            sessions[token] = {"user": _public_user(users[fallback_key]), "created_at": time.time()}
+            session = sessions[token]
+            _save_sessions()
+    if not token or not session or not isinstance(session.get("user"), dict):
+        return _error(start_response, "401 Unauthorized", "登录已失效，请重新登录。")
+
+    session_user = session["user"]
+    user_key = (
+        _find_user_key_by_phone(session_user.get("phone"))
+        or _find_user_key_by_apple(session_user.get("appleSub"), session_user.get("email"))
+    )
+    if not user_key:
+        return _error(start_response, "404 Not Found", "没有找到当前用户资料。")
+
+    stored_user = users.get(user_key, {}) if isinstance(users.get(user_key), dict) else {}
+    name = str(data.get("name") or data.get("nickname") or "").strip()
+    gender = str(data.get("gender") or "").strip()
+    nationality = str(data.get("nationality") or "").strip()
+    bio = str(data.get("bio") or "").strip()
+    avatar_image = str(data.get("avatarImage") or stored_user.get("avatarImage") or "").strip()
+    avatar = str(data.get("avatar") or stored_user.get("avatar") or "teal").strip()
+
+    if not 1 <= len(name) <= 24:
+        return _error(start_response, "400 Bad Request", "姓名长度需要在 1-24 个字符之间。")
+    if gender and gender not in {"女", "男", "其他", "不便透露"}:
+        return _error(start_response, "400 Bad Request", "请选择有效性别。")
+    if len(nationality) > 40:
+        return _error(start_response, "400 Bad Request", "国籍不能超过 40 个字符。")
+    if len(bio) > 300:
+        return _error(start_response, "400 Bad Request", "个人介绍不能超过 300 个字符。")
+    if avatar_image and not _valid_product_image_src(avatar_image):
+        return _error(start_response, "400 Bad Request", "头像图片格式无效或超过大小限制。")
+
+    profile = {
+        **stored_user,
+        "name": name,
+        "nickname": name,
+        "gender": gender,
+        "nationality": nationality,
+        "bio": bio,
+        "avatar": avatar or "teal",
+        "avatarImage": avatar_image,
+        "updated_at": int(time.time()),
+    }
+    phone = str(profile.get("phone") or session_user.get("phone") or "").strip()
+    if _valid_phone(phone):
+        user_key = _save_canonical_user(phone, profile, user_key)
+        profile = users[user_key]
+    else:
+        users[user_key] = profile
+        _save_users()
+
+    user = _public_user(profile)
+    session["user"] = user
+    _save_sessions()
+    return _json_response(start_response, "200 OK", {"ok": True, "user": user})
+
+
+def _handle_restore_session(environ, start_response):
+    data, error = _read_json(environ)
+    if error:
+        return _error(start_response, "400 Bad Request", error)
+
+    user_key = (
+        _find_user_key_by_phone(data.get("phone"))
+        or _find_user_key_by_apple(data.get("appleSub"), data.get("email"))
+    )
+    if not user_key or not isinstance(users.get(user_key), dict):
+        return _error(start_response, "401 Unauthorized", "无法恢复登录，请重新登录。")
+
+    user = _public_user(users[user_key])
+    token = _create_session(user)
+    return _json_response(start_response, "200 OK", {"ok": True, "token": token, "user": user})
 
 
 def _handle_auth_config(environ, start_response):
@@ -729,6 +1122,95 @@ def _handle_auth_config(environ, start_response):
             "appleRedirectUri": APPLE_REDIRECT_URI,
         },
     )
+
+
+def _amap_get(endpoint: str, params: dict[str, str]) -> dict[str, Any]:
+    if not AMAP_WEB_KEY:
+        return {}
+    query = urlencode({**params, "key": AMAP_WEB_KEY})
+    request = Request(f"https://restapi.amap.com/v3/{endpoint}?{query}", headers={"User-Agent": "StayNest/1.0"})
+    with urlopen(request, timeout=6) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _convert_gps_to_amap(longitude: str, latitude: str) -> tuple[str, str]:
+    result = _amap_get(
+        "assistant/coordinate/convert",
+        {
+            "locations": f"{longitude},{latitude}",
+            "coordsys": "gps",
+        },
+    )
+    locations = str(result.get("locations") or "").strip()
+    if result.get("status") != "1" or not locations or "," not in locations:
+        return longitude, latitude
+    converted_longitude, converted_latitude = [part.strip() for part in locations.split(",", 1)]
+    float(converted_latitude)
+    float(converted_longitude)
+    return converted_longitude, converted_latitude
+
+
+def _handle_place_suggest(environ, start_response):
+    params = parse_qs(environ.get("QUERY_STRING") or "")
+    keyword = str(params.get("keyword", [""])[0] or "").strip()
+    city = str(params.get("city", [""])[0] or "").strip()
+    if not keyword:
+        return _json_response(start_response, "200 OK", {"ok": True, "suggestions": []})
+
+    suggestions: list[str] = []
+    try:
+        result = _amap_get(
+            "assistant/inputtips",
+            {
+                "keywords": keyword[:40],
+                "city": city[:20],
+                "citylimit": "false",
+                "datatype": "all",
+            },
+        )
+        for tip in result.get("tips") or []:
+            if not isinstance(tip, dict):
+                continue
+            name = str(tip.get("name") or "").strip()
+            district = str(tip.get("district") or "").strip()
+            address = str(tip.get("address") or "").strip()
+            parts = [part for part in [district, address, name] if part and part != "[]"]
+            label = " ".join(parts)
+            if label and label not in suggestions:
+                suggestions.append(label[:120])
+            if len(suggestions) >= 8:
+                break
+    except Exception:
+        suggestions = []
+    return _json_response(start_response, "200 OK", {"ok": True, "suggestions": suggestions})
+
+
+def _handle_place_reverse(environ, start_response):
+    params = parse_qs(environ.get("QUERY_STRING") or "")
+    latitude = str(params.get("lat", [""])[0] or "").strip()
+    longitude = str(params.get("lng", [""])[0] or "").strip()
+    try:
+        float(latitude)
+        float(longitude)
+    except ValueError:
+        return _error(start_response, "400 Bad Request", "定位坐标无效。")
+
+    address = ""
+    try:
+        amap_longitude, amap_latitude = _convert_gps_to_amap(longitude, latitude)
+        result = _amap_get(
+            "geocode/regeo",
+            {
+                "location": f"{amap_longitude},{amap_latitude}",
+                "extensions": "base",
+                "radius": "500",
+            },
+        )
+        regeocode = result.get("regeocode") or {}
+        address = str(regeocode.get("formatted_address") or "").strip()
+    except Exception:
+        address = ""
+    return _json_response(start_response, "200 OK", {"ok": True, "address": address[:120]})
 
 
 def _verify_apple_identity_token(identity_token: str) -> dict[str, Any]:
@@ -772,29 +1254,30 @@ def _handle_apple_login(environ, start_response):
     apple_sub = payload.get("sub")
     email = payload.get("email", "")
     name = str(data.get("name") or "").strip() or email or "Apple 用户"
-    user_key = f"apple:{apple_sub or email or secrets.token_urlsafe(8)}"
-    stored_user = users.get(user_key, {})
+    user_key = _find_user_key_by_apple(apple_sub, email)
+    stored_user = users.get(user_key, {}) if user_key else {}
     if stored_user and _is_registered_user_complete(stored_user):
         user = _public_user(stored_user)
         token = _create_session(user, {"created_at": now})
         return _json_response(start_response, "200 OK", {"ok": True, "token": token, "user": user})
 
-    registration_token = _create_session(
+    apple_phone_token = _create_session(
         {
             "name": name,
             "nickname": name,
             "avatar": "ink",
             "method": "Apple ID",
-            "phone": "",
+            "phone": str(stored_user.get("phone") or ""),
             "appleSub": apple_sub,
             "email": email,
         },
         {
-            "pending_registration": True,
+            "pending_apple_phone": True,
             "registration_method": "Apple ID",
             "user_key": user_key,
             "appleSub": apple_sub,
             "email": email,
+            "name": name,
         },
     )
     suggested_name = str(stored_user.get("name") or stored_user.get("nickname") or name or "").strip()
@@ -803,10 +1286,10 @@ def _handle_apple_login(environ, start_response):
         "200 OK",
         {
             "ok": True,
-            "requiresRegistration": True,
-            "registrationToken": registration_token,
+            "requiresPhoneVerification": True,
+            "applePhoneToken": apple_phone_token,
             "provider": "Apple ID",
-            "registrationLabel": "Apple ID 已验证",
+            "registrationLabel": "Apple ID 已验证，请绑定手机号",
             "name": "" if "@" in suggested_name else suggested_name,
         },
     )
@@ -849,8 +1332,8 @@ def _public_guide_application(application: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _find_existing_guide_application_index(user: dict[str, Any], real_name: str) -> int:
-    phone = "".join(ch for ch in str(user.get("phone") or "") if ch.isdigit())
+def _find_existing_guide_application_index(user: dict[str, Any], real_name: str, phone_override: str = "") -> int:
+    phone = str(phone_override or user.get("phone") or "")
     apple_sub = str(user.get("appleSub") or "").strip()
     email = str(user.get("email") or "").strip().lower()
     names = {
@@ -861,7 +1344,6 @@ def _find_existing_guide_application_index(user: dict[str, Any], real_name: str)
     names.discard("")
 
     for index, item in enumerate(guide_applications):
-        item_phone = "".join(ch for ch in str(item.get("phone") or "") if ch.isdigit())
         item_apple_sub = str(item.get("appleSub") or "").strip()
         item_email = str(item.get("email") or "").strip().lower()
         item_names = {
@@ -869,7 +1351,7 @@ def _find_existing_guide_application_index(user: dict[str, Any], real_name: str)
             str(item.get("applicantName") or "").strip(),
         }
         item_names.discard("")
-        if phone and item_phone and item_phone == phone:
+        if _phone_matches(phone, item.get("phone")):
             return index
         if apple_sub and item_apple_sub and item_apple_sub == apple_sub:
             return index
@@ -1196,9 +1678,17 @@ def _public_order(order: dict[str, Any]) -> dict[str, Any]:
         "preference": str(order.get("preference") or ""),
         "duration": str(order.get("duration") or ""),
         "travelDate": str(order.get("travelDate") or ""),
+        "lodgingAddress": str(order.get("lodgingAddress") or ""),
         "price": price,
         "travelerName": str(order.get("travelerName") or ""),
+        "travelerIdInfo": str(order.get("travelerIdInfo") or ""),
         "travelerPhone": str(order.get("travelerPhone") or ""),
+        "companions": order.get("companions") if isinstance(order.get("companions"), list) else [],
+        "companionInfo": str(order.get("companionInfo") or ""),
+        "dietaryNotes": str(order.get("dietaryNotes") or ""),
+        "orderRemark": str(order.get("orderRemark") or ""),
+        "paymentMethod": str(order.get("paymentMethod") or ""),
+        "paymentStatus": str(order.get("paymentStatus") or ""),
         "guideName": str(order.get("guideName") or ""),
         "guidePhone": str(order.get("guidePhone") or ""),
         "claimedAt": str(order.get("claimedAt") or ""),
@@ -1206,6 +1696,28 @@ def _public_order(order: dict[str, Any]) -> dict[str, Any]:
         "createdAt": str(order.get("createdAt") or ""),
         "updatedAt": str(order.get("updatedAt") or ""),
     }
+
+
+def _sanitize_order_companions(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    companions: list[dict[str, str]] = []
+    for item in value[:20]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()[:40]
+        id_info = str(item.get("idInfo") or "").strip()[:80]
+        if not name or not id_info:
+            continue
+        companions.append(
+            {
+                "name": name,
+                "type": str(item.get("type") or "").strip()[:20],
+                "idInfo": id_info,
+                "note": str(item.get("note") or "").strip()[:120],
+            }
+        )
+    return companions
 
 
 def _order_chat_identity(environ, data: dict[str, Any] | None = None) -> dict[str, str]:
@@ -1223,26 +1735,22 @@ def _find_order(order_id: str) -> dict[str, Any] | None:
 
 
 def _is_order_participant(order: dict[str, Any], identity: dict[str, str]) -> bool:
-    phone = "".join(ch for ch in str(identity.get("phone") or "") if ch.isdigit())
+    phone = str(identity.get("phone") or "")
     name = str(identity.get("name") or "").strip()
-    traveler_phone = "".join(ch for ch in str(order.get("travelerPhone") or "") if ch.isdigit())
-    guide_phone = "".join(ch for ch in str(order.get("guidePhone") or "") if ch.isdigit())
     traveler_name = str(order.get("travelerName") or "").strip()
     guide_name = str(order.get("guideName") or "").strip()
     return bool(
-        (phone and phone in {traveler_phone, guide_phone})
+        (phone and (_phone_matches(phone, order.get("travelerPhone")) or _phone_matches(phone, order.get("guidePhone"))))
         or (name and name in {traveler_name, guide_name})
     )
 
 
 def _chat_role_for_order(order: dict[str, Any], identity: dict[str, str]) -> str:
-    phone = "".join(ch for ch in str(identity.get("phone") or "") if ch.isdigit())
+    phone = str(identity.get("phone") or "")
     name = str(identity.get("name") or "").strip()
-    traveler_phone = "".join(ch for ch in str(order.get("travelerPhone") or "") if ch.isdigit())
-    guide_phone = "".join(ch for ch in str(order.get("guidePhone") or "") if ch.isdigit())
-    if phone and guide_phone and phone == guide_phone:
+    if phone and _phone_matches(phone, order.get("guidePhone")):
         return "guide"
-    if phone and traveler_phone and phone == traveler_phone:
+    if phone and _phone_matches(phone, order.get("travelerPhone")):
         return "traveler"
     if name and name == str(order.get("guideName") or "").strip():
         return "guide"
@@ -1283,6 +1791,46 @@ def _handle_list_order_chat(environ, start_response):
     return _json_response(start_response, "200 OK", {"ok": True, "messages": messages})
 
 
+def _handle_order_chat_summary(environ, start_response):
+    data, error = _read_json(environ)
+    if error:
+        return _error(start_response, "400 Bad Request", error)
+
+    identity = _order_chat_identity(environ, data)
+    read_state = data.get("readState") if isinstance(data.get("readState"), dict) else {}
+    summaries: list[dict[str, Any]] = []
+    for order in orders:
+        if not _is_order_participant(order, identity):
+            continue
+        order_id = str(order.get("id") or "")
+        if not order_id:
+            continue
+        role = _chat_role_for_order(order, identity)
+        order_messages = [
+            _public_chat_message(message)
+            for message in chat_messages
+            if str(message.get("orderId") or "") == order_id
+        ]
+        order_messages.sort(key=lambda item: item.get("createdAt") or "")
+        read_at = str(read_state.get(order_id) or "")
+        unread_count = sum(
+            1
+            for message in order_messages
+            if str(message.get("senderRole") or "") != role
+            and (not read_at or str(message.get("createdAt") or "") > read_at)
+        )
+        summaries.append(
+            {
+                "orderId": order_id,
+                "messageCount": len(order_messages),
+                "unreadCount": unread_count,
+                "latestMessage": order_messages[-1] if order_messages else None,
+            }
+        )
+
+    return _json_response(start_response, "200 OK", {"ok": True, "summaries": summaries})
+
+
 def _handle_send_order_chat(environ, start_response):
     data, error = _read_json(environ)
     if error:
@@ -1319,6 +1867,132 @@ def _handle_send_order_chat(environ, start_response):
     return _json_response(start_response, "200 OK", {"ok": True, "message": _public_chat_message(message)})
 
 
+def _fallback_translate_to_english(text: str) -> str:
+    source = str(text or "").strip()
+    if not source:
+        return ""
+    if all(ord(char) < 128 for char in source):
+        return source
+
+    phrase_map = [
+        ("明天在哪里集合", "Where should we meet tomorrow"),
+        ("今天在哪里集合", "Where should we meet today"),
+        ("酒店地址是这里", "The hotel address is here"),
+        ("民宿地址是这里", "The homestay address is here"),
+        ("酒店地址", "hotel address"),
+        ("民宿地址", "homestay address"),
+        ("你好", "Hello"),
+        ("您好", "Hello"),
+        ("早上好", "Good morning"),
+        ("下午好", "Good afternoon"),
+        ("晚上好", "Good evening"),
+        ("好的", "OK"),
+        ("可以", "That works"),
+        ("不可以", "That does not work"),
+        ("谢谢", "Thank you"),
+        ("不用谢", "You are welcome"),
+        ("我到了", "I have arrived"),
+        ("马上到", "I will arrive soon"),
+        ("稍等", "Please wait a moment"),
+        ("在哪里集合", "Where should we meet"),
+        ("集合地点", "meeting point"),
+        ("集合时间", "meeting time"),
+        ("酒店", "hotel"),
+        ("民宿", "homestay"),
+        ("地址", "address"),
+        ("接送", "pickup and drop-off"),
+        ("司机", "driver"),
+        ("导游", "guide"),
+        ("游客", "traveler"),
+        ("旅客", "traveler"),
+        ("行程", "itinerary"),
+        ("路线", "route"),
+        ("今天", "today"),
+        ("明天", "tomorrow"),
+        ("早上", "morning"),
+        ("下午", "afternoon"),
+        ("晚上", "evening"),
+        ("不要辣", "no spicy food"),
+        ("不吃辣", "no spicy food"),
+        ("过敏", "allergy"),
+        ("儿童", "child"),
+        ("老人", "elderly traveler"),
+        ("请问", "May I ask"),
+        ("几点", "what time"),
+        ("多少钱", "how much"),
+        ("这里", "here"),
+        ("是", "is"),
+    ]
+    translated = source
+    for original, english in sorted(phrase_map, key=lambda item: len(item[0]), reverse=True):
+        translated = translated.replace(original, english)
+    translated = (
+        translated.replace("，", ", ")
+        .replace("。", ".")
+        .replace("？", "? ")
+        .replace("！", "! ")
+        .replace("、", ", ")
+    )
+    translated = " ".join(translated.split())
+    return translated if translated != source else f"English translation: {source}"
+
+
+def _translate_to_english(text: str) -> tuple[str, str]:
+    if TRANSLATE_API_URL:
+        payload = {
+            "q": text,
+            "source": "auto",
+            "target": "en",
+            "format": "text",
+        }
+        if TRANSLATE_API_KEY:
+            payload["api_key"] = TRANSLATE_API_KEY
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = Request(
+            TRANSLATE_API_URL,
+            data=body,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=8) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            translated = (
+                result.get("translatedText")
+                or result.get("translation")
+                or result.get("text")
+                or result.get("data", {}).get("translatedText")
+                or ""
+            )
+            if translated:
+                return str(translated), "provider"
+        except Exception:
+            pass
+    return _fallback_translate_to_english(text), "fallback"
+
+
+def _handle_translate(environ, start_response):
+    data, error = _read_json(environ)
+    if error:
+        return _error(start_response, "400 Bad Request", error)
+
+    text = str(data.get("text") or "").strip()
+    target = str(data.get("target") or "en").strip().lower()
+    if not text:
+        return _error(start_response, "400 Bad Request", "翻译内容不能为空。")
+    if len(text) > 1000:
+        return _error(start_response, "400 Bad Request", "翻译内容不能超过 1000 字。")
+    if target not in {"en", "english"}:
+        return _error(start_response, "400 Bad Request", "暂时只支持翻译成英文。")
+
+    translation, source = _translate_to_english(text)
+    return _json_response(
+        start_response,
+        "200 OK",
+        {"ok": True, "translation": translation, "target": "en", "source": source},
+    )
+
+
 def _handle_create_order(environ, start_response):
     data, error = _read_json(environ)
     if error:
@@ -1348,7 +2022,22 @@ def _handle_create_order(environ, start_response):
     traveler_name = str(
         data.get("travelerName") or user.get("nickname") or user.get("name") or "StayNest 用户"
     ).strip()
+    traveler_id_info = str(data.get("travelerIdInfo") or "").strip()
     traveler_phone = str(data.get("travelerPhone") or user.get("phone") or "").strip()
+    lodging_address = str(data.get("lodgingAddress") or "").strip()
+    companions = _sanitize_order_companions(data.get("companions"))
+    companion_info = str(data.get("companionInfo") or "").strip()
+    dietary_notes = str(data.get("dietaryNotes") or "").strip()
+    order_remark = str(data.get("orderRemark") or "").strip()
+    payment_method = str(data.get("paymentMethod") or "线上支付").strip()
+    if not traveler_name or len(traveler_name) > 40:
+        return _error(start_response, "400 Bad Request", "请填写 1-40 个字符的主要出行人姓名。")
+    if not traveler_id_info or len(traveler_id_info) > 80:
+        return _error(start_response, "400 Bad Request", "请填写 1-80 个字符的主要出行人证件信息。")
+    if not traveler_phone or len(traveler_phone) > 32:
+        return _error(start_response, "400 Bad Request", "请填写 1-32 个字符的有效联系方式。")
+    if not lodging_address or len(lodging_address) > 120:
+        return _error(start_response, "400 Bad Request", "请填写 1-120 个字符的下榻住所地址。")
     try:
         price = int(float(product.get("price") or 399))
     except (TypeError, ValueError):
@@ -1364,10 +2053,18 @@ def _handle_create_order(environ, start_response):
         "preference": str(product.get("preference") or ""),
         "duration": str(product.get("duration") or "一日游"),
         "travelDate": travel_date,
+        "lodgingAddress": lodging_address[:120],
         "price": max(price, 1),
         "travelerName": traveler_name[:40],
+        "travelerIdInfo": traveler_id_info[:80],
         "travelerPhone": traveler_phone[:32],
-        "status": "待确认",
+        "companions": companions,
+        "companionInfo": companion_info[:1000],
+        "dietaryNotes": dietary_notes[:300],
+        "orderRemark": order_remark[:500],
+        "paymentMethod": payment_method[:20],
+        "paymentStatus": "已支付",
+        "status": "已支付",
         "createdAt": now,
         "updatedAt": now,
     }
@@ -1401,10 +2098,18 @@ def _order_from_payload(data: dict[str, Any]) -> dict[str, Any] | None:
         "preference": str(data.get("preference") or (product or {}).get("preference") or ""),
         "duration": str(data.get("duration") or (product or {}).get("duration") or "一日游"),
         "travelDate": travel_date,
+        "lodgingAddress": str(data.get("lodgingAddress") or "")[:120],
         "price": max(price, 1),
         "travelerName": str(data.get("travelerName") or "游客")[:40],
+        "travelerIdInfo": str(data.get("travelerIdInfo") or "")[:80],
         "travelerPhone": str(data.get("travelerPhone") or "")[:32],
-        "status": str(data.get("status") or "待确认"),
+        "companions": _sanitize_order_companions(data.get("companions")),
+        "companionInfo": str(data.get("companionInfo") or "")[:1000],
+        "dietaryNotes": str(data.get("dietaryNotes") or "")[:300],
+        "orderRemark": str(data.get("orderRemark") or "")[:500],
+        "paymentMethod": str(data.get("paymentMethod") or "线上支付")[:20],
+        "paymentStatus": str(data.get("paymentStatus") or "已支付")[:20],
+        "status": str(data.get("status") or "已支付"),
         "createdAt": str(data.get("createdAt") or now),
         "updatedAt": now,
     }
@@ -1444,8 +2149,8 @@ def _handle_list_orders(environ, start_response):
     matched_orders = [
         _public_order(order)
         for order in orders
-        if (phone and str(order.get("travelerPhone") or "") == phone)
-        or (phone and str(order.get("guidePhone") or "") == phone)
+        if (phone and _phone_matches(order.get("travelerPhone"), phone))
+        or (phone and _phone_matches(order.get("guidePhone"), phone))
         or (name and str(order.get("travelerName") or "") == name)
         or (name and str(order.get("guideName") or "") == name)
     ]
@@ -1457,24 +2162,58 @@ def _handle_admin_list_orders(environ, start_response):
 
 
 def _guide_status_for_user(user: dict[str, Any]) -> str:
-    phone = "".join(ch for ch in str(user.get("phone") or "") if ch.isdigit())
-    name = str(user.get("nickname") or user.get("name") or "").strip()
-    for application in guide_applications:
-        application_phone = "".join(ch for ch in str(application.get("phone") or "") if ch.isdigit())
-        application_name = str(application.get("realName") or application.get("applicantName") or "").strip()
-        if (phone and application_phone == phone) or (name and application_name == name):
-            return str(application.get("reviewStatus") or application.get("status") or "审核中")
+    application = _guide_application_for_profile(user)
+    if application:
+        return str(application.get("reviewStatus") or application.get("status") or "审核中")
     return "未申请"
+
+
+def _guide_completed_order_count_for_user(user: dict[str, Any]) -> int:
+    phone = str(user.get("phone") or "")
+    names = {
+        str(user.get("nickname") or "").strip(),
+        str(user.get("name") or "").strip(),
+    }
+    application = _guide_application_for_profile(user)
+    if application:
+        phone = phone or str(application.get("phone") or "")
+        names.add(str(application.get("realName") or application.get("applicantName") or "").strip())
+    names.discard("")
+    return sum(
+        1
+        for order in orders
+        if str(order.get("status") or "") == "已完成"
+        and (
+            (phone and _phone_matches(order.get("guidePhone"), phone))
+            or (str(order.get("guideName") or "").strip() in names)
+        )
+    )
+
+
+def _guide_level_for_completed_orders(completed_orders: int) -> str:
+    if completed_orders >= 500:
+        return "资深导游"
+    if completed_orders >= 100:
+        return "金牌导游"
+    if completed_orders >= 50:
+        return "银牌导游"
+    if completed_orders >= 10:
+        return "铜牌导游"
+    return "实习导游"
 
 
 def _public_admin_user(record_key: str, profile: dict[str, Any]) -> dict[str, Any]:
     public_user = _public_user(profile)
     guide_status = _guide_status_for_user(public_user)
+    guide_completed_orders = _guide_completed_order_count_for_user(public_user)
+    guide_level = _guide_level_for_completed_orders(guide_completed_orders) if guide_status == "已通过" else ""
     return {
         "id": record_key,
         **public_user,
-        "role": "导游" if guide_status == "已通过" else "游客",
+        "role": guide_level if guide_level else "游客",
         "guideStatus": guide_status,
+        "guideCompletedOrders": guide_completed_orders,
+        "guideLevel": guide_level,
     }
 
 
@@ -1492,7 +2231,8 @@ def _handle_available_orders(environ, start_response):
     available_orders = [
         _public_order(order)
         for order in orders
-        if str(order.get("status") or "") == "待确认" and not str(order.get("guidePhone") or "")
+        if str(order.get("status") or "") in {"已支付", "待确认"}
+        and not (str(order.get("guidePhone") or "") or str(order.get("guideName") or ""))
     ]
     return _json_response(start_response, "200 OK", {"ok": True, "orders": available_orders})
 
@@ -1514,7 +2254,7 @@ def _handle_grab_order(environ, start_response):
     for order in orders:
         if str(order.get("id") or "") != order_id:
             continue
-        if str(order.get("status") or "") != "待确认" or str(order.get("guidePhone") or ""):
+        if str(order.get("status") or "") not in {"已支付", "待确认"} or str(order.get("guidePhone") or "") or str(order.get("guideName") or ""):
             return _error(start_response, "409 Conflict", "这条订单已被其他导游抢走。")
         order["status"] = "进行中"
         order["guideName"] = guide_name[:40]
@@ -1556,6 +2296,7 @@ def _handle_create_guide_application(environ, start_response):
     specialty = str(data.get("specialty") or "").strip()
     english_level = str(data.get("englishLevel") or "").strip()
     intro = str(data.get("intro") or "").strip()
+    phone = _normalize_phone(data.get("phone") or user.get("phone") or "")
     id_card_front = _public_attachment(data.get("idCardFront"))
     id_card_back = _public_attachment(data.get("idCardBack"))
     profile_photo = _public_attachment(data.get("profilePhoto"))
@@ -1565,6 +2306,8 @@ def _handle_create_guide_application(environ, start_response):
         return _error(start_response, "400 Bad Request", "请填写 1-24 个字符的真实姓名。")
     if gender not in {"女", "男", "其他", "不便透露"}:
         return _error(start_response, "400 Bad Request", "请选择性别。")
+    if not _valid_phone(phone):
+        return _error(start_response, "400 Bad Request", "请填写有效的手机号码。")
     if not city or len(city) > 20:
         return _error(start_response, "400 Bad Request", "请填写 1-20 个字符的服务城市。")
     if not specialty or len(specialty) > 24:
@@ -1576,10 +2319,9 @@ def _handle_create_guide_application(environ, start_response):
     if not id_card_front or not id_card_back or not profile_photo:
         return _error(start_response, "400 Bad Request", "请上传身份证正反面和形象照片。")
 
-    phone = str(user.get("phone") or "")
     apple_sub = str(user.get("appleSub") or "")
     email = str(user.get("email") or "")
-    existing_index = _find_existing_guide_application_index(user, real_name)
+    existing_index = _find_existing_guide_application_index(user, real_name, phone)
     application = {
         "id": str(guide_applications[existing_index].get("id") if existing_index >= 0 else f"guide-{int(time.time() * 1000)}"),
         "applicantName": real_name,
@@ -1609,6 +2351,18 @@ def _handle_create_guide_application(environ, start_response):
     else:
         guide_applications.insert(0, application)
     _save_guide_applications()
+    auth = environ.get("HTTP_AUTHORIZATION", "")
+    token = auth.removeprefix("Bearer ").strip()
+    if token in sessions and isinstance(sessions[token].get("user"), dict):
+        guide_completed_orders = _guide_completed_order_count_for_user(sessions[token]["user"])
+        sessions[token]["user"] = {
+            **sessions[token]["user"],
+            "phone": sessions[token]["user"].get("phone") or phone,
+            "guideStatus": application["reviewStatus"],
+            "guideCompletedOrders": guide_completed_orders,
+            "guideLevel": "",
+        }
+        _save_sessions()
     return _json_response(start_response, "200 OK", {"ok": True, "application": _public_guide_application(application)})
 
 
@@ -1658,6 +2412,7 @@ def _handle_clear_guide_applications(environ, start_response):
     _save_orders()
     _save_chat_messages()
     _save_users()
+    _save_sessions()
     return _json_response(start_response, "200 OK", {"ok": True, "applications": [], "products": [], "orders": [], "messages": [], "users": 0})
 
 
@@ -1709,10 +2464,18 @@ def app(environ, start_response):
         return _handle_register(environ, start_response)
     if path == "/api/auth/session" and method == "GET":
         return _handle_session(environ, start_response)
+    if path == "/api/auth/restore-session" and method == "POST":
+        return _handle_restore_session(environ, start_response)
+    if path == "/api/profile" and method == "POST":
+        return _handle_update_profile(environ, start_response)
     if path == "/api/auth/config" and method == "GET":
         return _handle_auth_config(environ, start_response)
     if path == "/api/auth/apple" and method == "POST":
         return _handle_apple_login(environ, start_response)
+    if path == "/api/places/suggest" and method == "GET":
+        return _handle_place_suggest(environ, start_response)
+    if path == "/api/places/reverse" and method == "GET":
+        return _handle_place_reverse(environ, start_response)
     if path == "/api/products" and method == "GET":
         return _handle_list_products(environ, start_response)
     if path == "/api/orders" and method == "GET":
@@ -1729,6 +2492,8 @@ def app(environ, start_response):
         return _handle_list_order_chat(environ, start_response)
     if path == "/api/orders/chat" and method == "POST":
         return _handle_send_order_chat(environ, start_response)
+    if path == "/api/translate" and method == "POST":
+        return _handle_translate(environ, start_response)
     if path == "/api/guides/applications" and method == "POST":
         return _handle_create_guide_application(environ, start_response)
     if path == "/api/admin/guides/applications" and method == "GET":
